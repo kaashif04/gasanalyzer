@@ -1,0 +1,13 @@
+{
+  "name": "biogas-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Live + historical monitoring for a biogas analyzer (ESP32 → Google Sheet → Express → React).",
+  "scripts": {
+    "install:all": "npm --prefix server install && npm --prefix client install",
+    "dev:server": "npm --prefix server run dev",
+    "dev:client": "npm --prefix client run dev",
+    "dev": "npm run dev:server & npm run dev:client",
+    "build": "npm --prefix server run build && npm --prefix client run build"
+  }
+}
