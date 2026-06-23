@@ -13,9 +13,10 @@ import { useHistory } from "../hooks/useHistory";
 import { useUnits } from "../context/UnitContext";
 import { ENV_COLORS, MQ_CHANNELS } from "../lib/constants";
 import { Reading } from "../lib/types";
-import { convertCo2, convertMq, UNIT_META } from "../lib/units";
+import { convertCo2, convertMq, isEstimatedUnit, UNIT_META } from "../lib/units";
 import { axisTime, clockTime, dateTime, fmt } from "../lib/format";
 import RangePicker from "../components/common/RangePicker";
+import EstimatedTag from "../components/common/EstimatedTag";
 import { PageHeader } from "./LiveDashboard";
 
 type EnvKey = "none" | "co2_ppm" | "temp_c" | "humidity_pct";
@@ -125,6 +126,7 @@ export default function Trends() {
                       active={s.raw}
                       color={ch.color}
                       dashed
+                      title="Raw, uncompensated — still carries heavy thermal drift. Secondary/diagnostic overlay only."
                       onClick={() =>
                         setSel((p) => ({ ...p, [ch.id]: { ...s, raw: !s.raw } }))
                       }
@@ -161,10 +163,13 @@ export default function Trends() {
 
         {/* Chart */}
         <div className="panel p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <div className="text-xs text-slate-500">
-              {loading ? "loading…" : `${readings.length} points · left axis ${mqUnit}`}
-              {env !== "none" && ` · right axis ${envMeta.label}`}
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <span>
+                {loading ? "loading…" : `${readings.length} points · left axis ${mqUnit}`}
+                {env !== "none" && ` · right axis ${envMeta.label}`}
+              </span>
+              {isEstimatedUnit(unit) && <EstimatedTag />}
             </div>
             {zoom && (
               <button
@@ -294,18 +299,21 @@ function ToggleChip({
   active,
   color,
   dashed,
+  title,
   onClick,
   children,
 }: {
   active: boolean;
   color: string;
   dashed?: boolean;
+  title?: string;
   onClick: () => void;
   children: React.ReactNode;
 }) {
   return (
     <button
       onClick={onClick}
+      title={title}
       className={`flex flex-1 items-center justify-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
         active ? "text-slate-100" : "border-white/[0.06] text-slate-500 hover:text-slate-300"
       }`}

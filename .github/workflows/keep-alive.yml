@@ -1,0 +1,19 @@
+name: Keep Render backend awake
+
+# Render's free tier spins the service down after ~15 minutes with no
+# inbound traffic, and a fresh process means the in-memory reading history
+# starts empty again until it backfills from the sheet. Pinging /health
+# every 10 minutes (offset off the top-of-hour to dodge scheduler congestion)
+# keeps the service inside that window so it never idles out, and the live
+# dashboard's in-memory history survives no matter how long between visits.
+on:
+  schedule:
+    - cron: "7,17,27,37,47,57 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend health endpoint
+        run: curl -fsS --max-time 20 https://gasanalyzer.onrender.com/health

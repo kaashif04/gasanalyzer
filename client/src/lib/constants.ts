@@ -52,6 +52,37 @@ export const SPIKE = {
   window: 21, // rolling window (samples) for the median delta
 };
 
+/**
+ * Measured post-compensation residual noise floor per channel, volts — from a
+ * sealed-chamber, clean-air, no-gas, 2h17m baseline run. This is the smallest
+ * change that could mean anything on that channel; anything smaller is noise,
+ * not signal. Used to gate the spike detector and the control-baseline delta
+ * display so neither one reports a sub-noise wiggle as a real event.
+ */
+export const NOISE_FLOOR_V: Record<MqChannel["id"], number> = {
+  mq4_1: 0.0011,
+  mq4_2: 0.0017,
+  mq8_1: 0.0006,
+  mq8_2: 0.0022,
+};
+
+/** How many multiples of a channel's own noise floor a change must clear
+ *  before it's treated as a real (not noise) event. */
+export const NOISE_FLOOR_GATE = 3;
+
+/**
+ * The temp/humidity envelope the firmware's per-channel compensation formula
+ * was actually FIT across (sealed-chamber baseline test). Outside this range,
+ * compensation accuracy is not validated — comp values and any correlation
+ * drawn from them deserve a visible caveat, not full-confidence treatment.
+ */
+export const CALIBRATED_RANGE = {
+  tempMin: 33.3,
+  tempMax: 35.0,
+  humidityMin: 53,
+  humidityMax: 59,
+};
+
 /** Sensor-pair agreement: established ratio range for siblings (comp channels).
  *  Outside ⇒ red (possible single-sensor fault). */
 export const PAIR_RATIO = {

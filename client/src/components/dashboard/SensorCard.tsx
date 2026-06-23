@@ -18,6 +18,9 @@ export interface SensorCardBaseline {
   deltaPct: number | null;
   stableDurationMs: number;
   isAtBaseline: boolean;
+  /** True if |delta| is smaller than the channel's own measured noise floor
+   *  — i.e. this isn't a confirmed change, just normal sensor noise. */
+  withinNoiseFloor: boolean;
 }
 
 export interface SensorCardModel {
@@ -170,6 +173,31 @@ function BaselineRow({
     );
   }
 
+  const controlLabel = (
+    <span
+      className="text-slate-500"
+      title="Automatically detected from the most recent sustained stretch of steady readings — this updates if conditions settle at a new level for long enough, rather than staying fixed."
+    >
+      Control <span className="tnum text-slate-300">{fmt(baseline.value, decimals)}</span>
+      <span className="text-slate-600"> {unitSuffix}</span>
+      <span className="ml-1.5 text-slate-600">· {duration(baseline.stableDurationMs)} stable</span>
+    </span>
+  );
+
+  if (baseline.withinNoiseFloor) {
+    return (
+      <div className="mt-2.5 flex items-center justify-between gap-2 rounded-lg bg-ink-850/60 px-2.5 py-1.5 text-[0.7rem]">
+        {controlLabel}
+        <span
+          className="tnum flex items-center gap-1 whitespace-nowrap font-medium text-slate-500"
+          title="This change is smaller than the channel's measured noise floor — not yet a confirmed change."
+        >
+          <span aria-hidden>≈</span> within noise
+        </span>
+      </div>
+    );
+  }
+
   const sign = baseline.delta > 0 ? "+" : baseline.delta < 0 ? "−" : "";
   const glyph = baseline.delta > 0 ? "▲" : baseline.delta < 0 ? "▼" : "●";
   const pct =
@@ -179,14 +207,7 @@ function BaselineRow({
 
   return (
     <div className="mt-2.5 flex items-center justify-between gap-2 rounded-lg bg-ink-850/60 px-2.5 py-1.5 text-[0.7rem]">
-      <span
-        className="text-slate-500"
-        title="Automatically detected from the most recent sustained stretch of steady readings — this updates if conditions settle at a new level for long enough, rather than staying fixed."
-      >
-        Control <span className="tnum text-slate-300">{fmt(baseline.value, decimals)}</span>
-        <span className="text-slate-600"> {unitSuffix}</span>
-        <span className="ml-1.5 text-slate-600">· {duration(baseline.stableDurationMs)} stable</span>
-      </span>
+      {controlLabel}
       <span className="tnum flex items-center gap-1 whitespace-nowrap font-medium text-info">
         <span aria-hidden>{glyph}</span>
         {sign}

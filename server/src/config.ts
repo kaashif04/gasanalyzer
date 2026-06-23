@@ -20,6 +20,14 @@ export const config = {
   sheetRange: process.env.SHEET_RANGE?.trim() || "Data",
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS) || 30_000,
   port: Number(process.env.PORT) || 4000,
+  // Minutes EAST of UTC that the sheet's naive "YYYY-MM-DD HH:mm:ss" timestamp
+  // strings are written in (the spreadsheet/Apps Script timezone — not the
+  // timezone of whatever machine happens to run this backend). Default 480 =
+  // UTC+8. MUST be explicit: parsing a naive datetime string with the host
+  // process's local timezone breaks the moment this runs somewhere other
+  // than the original dev machine's zone (e.g. Render's containers run UTC),
+  // silently shifting every row's timestamp by the zone difference.
+  sheetTzOffsetMin: Number(process.env.SHEET_TZ_OFFSET_MIN) || 480,
   useMock: explicitMock || missingCreds,
   mockReason: explicitMock
     ? "USE_MOCK=true"

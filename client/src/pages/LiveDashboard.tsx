@@ -3,7 +3,13 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useLiveData } from "../context/LiveDataContext";
 import { useUnits } from "../context/UnitContext";
 import { useBaselineHistory } from "../hooks/useBaselineHistory";
-import { ENV_COLORS, MQ_CHANNELS } from "../lib/constants";
+import {
+  CALIBRATED_RANGE,
+  ENV_COLORS,
+  MQ_CHANNELS,
+  NOISE_FLOOR_GATE,
+  NOISE_FLOOR_V,
+} from "../lib/constants";
 import { Reading } from "../lib/types";
 import {
   convertCo2,
@@ -15,6 +21,7 @@ import {
 import {
   co2Status,
   humidityStatus,
+  isWithinCalibratedRange,
   mqStatus,
   tempStatus,
 } from "../lib/status";
@@ -29,11 +36,19 @@ import { ago, fmt } from "../lib/format";
 /** Converts a raw-unit BaselineResult (volts for MQ, ppm for CO2) into the
  *  display-unit form SensorCard expects, applying the SAME conversion to both
  *  the baseline and the live value (correct for nonlinear ppm/% conversions,
- *  rather than converting a raw-unit delta directly). */
+ *  rather than converting a raw-unit delta directly).
+ *
+ *  `noiseFloorV` (volts — only meaningful for MQ comp channels, from a
+ *  sealed-chamber baseline measurement) gates the delta: a change smaller
+ *  than NOISE_FLOOR_GATE × that floor is the channel's own noise, not a
+ *  confirmed move, so it's reported as `withinNoiseFloor` rather than a
+ *  confident directional delta. Compared in RAW units (volts), before any
+ *  ppm/% conversion, since that's the unit the measured floor is in. */
 function toCardBaseline(
   raw: BaselineResult,
   liveRawValue: number,
-  convert: (v: number) => number
+  convert: (v: number) => number,
+  noiseFloorV?: number
 ): SensorCardBaseline {
   if (!raw.available) {
     return {
@@ -43,6 +58,7 @@ function toCardBaseline(
       deltaPct: null,
       stableDurationMs: 0,
       isAtBaseline: false,
+      withinNoiseFloor: false,
     };
   }
   const baselineDisplay = convert(raw.baselineValue);
@@ -50,6 +66,9 @@ function toCardBaseline(
   const delta = liveDisplay - baselineDisplay;
   const deltaPct =
     Math.abs(baselineDisplay) > 1e-6 ? (delta / Math.abs(baselineDisplay)) * 100 : null;
+  const rawDelta = Math.abs(liveRawValue - raw.baselineValue);
+  const withinNoiseFloor =
+    noiseFloorV != null && rawDelta < noiseFloorV * NOISE_FLOOR_GATE;
   return {
     available: true,
     value: baselineDisplay,
@@ -57,6 +76,7 @@ function toCardBaseline(
     deltaPct,
     stableDurationMs: raw.stableDurationMs,
     isAtBaseline: raw.isAtBaseline,
+    withinNoiseFloor,
   };
 }
 
@@ -126,8 +146,11 @@ export default function LiveDashboard() {
       secondaryNote: showRaw ? "raw (uncompensated)" : undefined,
       estimated: est,
       spikeFiltered: latest.spike_flag === 1,
-      baseline: toCardBaseline(baselines[ch.id], latest[ch.comp], (v) =>
-        convertMq(v, ch.sensor, unit)
+      baseline: toCardBaseline(
+        baselines[ch.id],
+        latest[ch.comp],
+        (v) => convertMq(v, ch.sensor, unit),
+        NOISE_FLOOR_V[ch.id]
       ),
     }));
   }, [latest, history1h, unit, showRaw, baselines]);
@@ -207,6 +230,30 @@ export default function LiveDashboard() {
                       rowAgeMs
                     )} (>90s = 2 missed cycles). The ESP32 may be offline or the sheet isn't updating.`
                   : "Cannot reach the monitor backend. Check that the API server is running."}
+              </span>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {latest && !isWithinCalibratedRange(latest.temp_c, latest.humidity_pct) && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="flex items-center gap-3 rounded-xl border border-drift/30 bg-drift/10 px-4 py-3 text-sm text-drift"
+          >
+            <span className="text-lg leading-none">⚠</span>
+            <div>
+              <span className="font-semibold">Outside calibrated compensation range.</span>{" "}
+              <span className="text-drift/80">
+                The per-channel drift compensation was only validated for{" "}
+                {CALIBRATED_RANGE.tempMin}–{CALIBRATED_RANGE.tempMax}°C /{" "}
+                {CALIBRATED_RANGE.humidityMin}–{CALIBRATED_RANGE.humidityMax}% RH.
+                Current conditions ({fmt(latest.temp_c, 1)}°C, {fmt(latest.humidity_pct, 1)}%RH)
+                are outside that range, so compensated readings carry reduced confidence
+                right now — not a fault, just an unvalidated condition.
               </span>
             </div>
           </motion.div>

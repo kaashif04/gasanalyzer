@@ -1,10 +1,14 @@
 import {
+  CALIBRATED_RANGE,
   CORRELATION,
   MQ_CHANNELS,
+  NOISE_FLOOR_GATE,
+  NOISE_FLOOR_V,
   PAIR_RATIO,
   SENSOR_PAIRS,
   SPIKE,
 } from "./constants";
+import { isWithinCalibratedRange } from "./status";
 import { CompKey, Reading, StatusLevel } from "./types";
 
 export type DiagLevel = "green" | "amber" | "red";
@@ -61,10 +65,31 @@ export interface TempCorrelation {
   /** Plain-language interpretation for the operator. */
   note: string;
   samples: number;
+  /** Fraction (0-1) of this window where temp/humidity were outside the
+   *  range the compensation formula was actually validated across. */
+  outsideCalibratedFraction: number;
 }
 
 export function tempCorrelations(rows: Reading[]): TempCorrelation[] {
   const temps = rows.map((r) => r.temp_c);
+
+  const outsideCount = rows.filter(
+    (r) => !isWithinCalibratedRange(r.temp_c, r.humidity_pct)
+  ).length;
+  const outsideCalibratedFraction = rows.length ? outsideCount / rows.length : 0;
+  // Only worth surfacing once it's a substantial chunk of the window — a
+  // stray sample or two outside the band isn't worth a caveat every time.
+  const rangeCaveat =
+    outsideCalibratedFraction > 0.2
+      ? ` Note: ${Math.round(
+          outsideCalibratedFraction * 100
+        )}% of this window had temp/humidity outside the ${CALIBRATED_RANGE.tempMin}–${
+          CALIBRATED_RANGE.tempMax
+        }°C / ${CALIBRATED_RANGE.humidityMin}–${
+          CALIBRATED_RANGE.humidityMax
+        }% RH range the compensation formula was fit across — treat this correlation with reduced confidence outside that band.`
+      : "";
+
   return MQ_CHANNELS.map((ch) => {
     const series = rows.map((r) => r[ch.comp]);
     const r = pearson(temps, series);
@@ -80,19 +105,28 @@ export function tempCorrelations(rows: Reading[]): TempCorrelation[] {
       level = "green";
       note = `Decoupled from temperature (r=${r.toFixed(
         2
-      )}) — compensation is working.`;
+      )}) — compensation is working.${rangeCaveat}`;
     } else if (absr < CORRELATION.amberBelow) {
       level = "amber";
       note = `${ch.label} shows residual temperature coupling (r=${r.toFixed(
         2
-      )}) — watch for compensation drift.`;
+      )}) — watch for compensation drift.${rangeCaveat}`;
     } else {
       level = "red";
       note = `${ch.label} still temperature-correlated after compensation (r=${r.toFixed(
         2
-      )}) — compensation may need refitting for current conditions.`;
+      )}) — compensation may need refitting for current conditions.${rangeCaveat}`;
     }
-    return { channelId: ch.id, label: ch.label, comp: ch.comp, r, level, note, samples };
+    return {
+      channelId: ch.id,
+      label: ch.label,
+      comp: ch.comp,
+      r,
+      level,
+      note,
+      samples,
+      outsideCalibratedFraction,
+    };
   });
 }
 
@@ -105,6 +139,18 @@ export interface SpikeHit {
   delta: number;
   medianDelta: number;
   ratio: number;
+}
+
+/** A timestamp where ALL FOUR MQ channels jumped at once — the signature of
+ *  the known recurring electrical/timing glitch, not 4 independent events. */
+export interface GlitchHit {
+  ts: number;
+  deltas: { channelId: string; label: string; delta: number }[];
+}
+
+export interface SpikeDetectionResult {
+  spikes: SpikeHit[];
+  glitches: GlitchHit[];
 }
 
 function rollingMedian(values: number[], i: number, window: number): number {
@@ -122,25 +168,36 @@ function rollingMedian(values: number[], i: number, window: number): number {
 
 /**
  * Flags readings whose |Δ from previous row| exceeds SPIKE.factor × the rolling
- * median |Δ| for that channel. Rows the firmware already caught (spike_flag=1)
- * are excluded — this is the net to catch anything NEW/uncaught.
+ * median |Δ| for that channel — AND clears the channel's own measured noise
+ * floor (× NOISE_FLOOR_GATE), so a quiet stretch with a tiny rolling median
+ * can't make a sub-noise wiggle look like "5x the median" and get flagged.
+ * Rows the firmware already caught (spike_flag=1) are excluded — this is the
+ * net for anything NEW/uncaught.
+ *
+ * Candidates that land on the SAME timestamp across all four channels are
+ * the known recurring electrical/timing glitch (confirmed from baseline
+ * testing: all four jump together every ~5min, independent of gas/temp) —
+ * those are split out as `glitches`, not reported as four separate
+ * "uncaught spikes", even if spike_flag happened to be 0 for that row.
  */
-export function detectSpikes(rows: Reading[]): SpikeHit[] {
-  const hits: SpikeHit[] = [];
-  if (rows.length < 3) return hits;
+export function detectSpikes(rows: Reading[]): SpikeDetectionResult {
+  if (rows.length < 3) return { spikes: [], glitches: [] };
 
+  const candidates: SpikeHit[] = [];
   for (const ch of MQ_CHANNELS) {
     const series = rows.map((r) => r[ch.comp]);
     const deltas: number[] = series.map((v, i) =>
       i === 0 ? 0 : Math.abs(v - series[i - 1])
     );
+    const floor = NOISE_FLOOR_V[ch.id] * NOISE_FLOOR_GATE;
     for (let i = 1; i < rows.length; i++) {
       if (rows[i].spike_flag === 1) continue; // firmware already handled it
+      if (deltas[i] <= floor) continue; // within the channel's own noise floor — not a candidate
       const med = rollingMedian(deltas, i, SPIKE.window);
       if (!Number.isFinite(med) || med <= 1e-6) continue;
       const ratio = deltas[i] / med;
       if (ratio > SPIKE.factor) {
-        hits.push({
+        candidates.push({
           ts: rows[i].ts,
           channelId: ch.id,
           label: ch.label,
@@ -152,7 +209,36 @@ export function detectSpikes(rows: Reading[]): SpikeHit[] {
       }
     }
   }
-  return hits.sort((a, b) => b.ts - a.ts);
+
+  const byTs = new Map<number, SpikeHit[]>();
+  for (const c of candidates) {
+    const list = byTs.get(c.ts) ?? [];
+    list.push(c);
+    byTs.set(c.ts, list);
+  }
+
+  const spikes: SpikeHit[] = [];
+  const glitches: GlitchHit[] = [];
+  for (const [ts, group] of byTs) {
+    const distinctChannels = new Set(group.map((g) => g.channelId)).size;
+    if (distinctChannels === MQ_CHANNELS.length) {
+      glitches.push({
+        ts,
+        deltas: group.map((g) => ({
+          channelId: g.channelId,
+          label: g.label,
+          delta: g.delta,
+        })),
+      });
+    } else {
+      spikes.push(...group);
+    }
+  }
+
+  return {
+    spikes: spikes.sort((a, b) => b.ts - a.ts),
+    glitches: glitches.sort((a, b) => b.ts - a.ts),
+  };
 }
 
 // ── Sensor-pair agreement ────────────────────────────────────────────────────
@@ -276,15 +362,25 @@ export function classifyDisturbances(
   };
 
   // ── (c) Sensor fault: sibling divergence ──
+  // Compares small AVERAGED windows at each edge (not single endpoint
+  // samples) specifically so a single-cycle coincident glitch landing on the
+  // first or last row can't masquerade as a sustained divergence.
+  const edgeAvg = (arr: number[], n: number, fromStart: boolean) => {
+    const slice = fromStart ? arr.slice(0, n) : arr.slice(-n);
+    return slice.reduce((a, v) => a + v, 0) / slice.length;
+  };
   for (const { sensor, gasName, a, b } of SENSOR_PAIRS) {
     const w = tail(30);
+    const edge = Math.max(1, Math.min(3, Math.floor(w.length / 2)));
     const sa = w.map((r) => r[a.comp]);
     const sb = w.map((r) => r[b.comp]);
-    const aChange = Math.abs(sa[sa.length - 1] - sa[0]);
-    const bChange = Math.abs(sb[sb.length - 1] - sb[0]);
-    const sep = Math.abs(
-      sa[sa.length - 1] - sb[sb.length - 1] - (sa[0] - sb[0])
-    );
+    const aStart = edgeAvg(sa, edge, true);
+    const aEnd = edgeAvg(sa, edge, false);
+    const bStart = edgeAvg(sb, edge, true);
+    const bEnd = edgeAvg(sb, edge, false);
+    const aChange = Math.abs(aEnd - aStart);
+    const bChange = Math.abs(bEnd - bStart);
+    const sep = Math.abs(aEnd - bEnd - (aStart - bStart));
     const moverChange = Math.max(aChange, bChange);
     const stayChange = Math.min(aChange, bChange);
     // One sibling moved meaningfully, the separation grew, the other held.
@@ -299,24 +395,27 @@ export function classifyDisturbances(
     }
   }
 
-  // ── (b) Draft / door / breath: fast CO2 + MQ raw co-rise, no temp trend ──
+  // ── (b) Draft / door / breath: fast CO2 + an MQ raw channel co-rise, no
+  // temp trend. Requires the raw rise to be ASYMMETRIC (some but not all 4
+  // channels) — a genuine localized disturbance doesn't move every sensor in
+  // lockstep the way the known recurring all-channel timing glitch does, so
+  // requiring asymmetry keeps this from mistaking that glitch for a draft. ──
   {
     const w = tail(10);
     const co2 = w.map((r) => r.co2_ppm);
     const temp = w.map((r) => r.temp_c);
     const co2Rise = normalizedRange(co2);
-    const tempSlopePerMin =
-      (slope(temp) * 60_000) / stepMs; // °C per minute
-    const rawRises = MQ_CHANNELS.map((ch) =>
-      normalizedRange(w.map((r) => r[ch.raw]))
-    );
-    const anyRawRise = rawRises.some((v) => v > 0.04);
-    if (co2Rise > 0.12 && anyRawRise && Math.abs(tempSlopePerMin) < 0.05) {
+    const tempSlopePerMin = (slope(temp) * 60_000) / stepMs; // °C per minute
+    const rawRiseCount = MQ_CHANNELS.filter(
+      (ch) => normalizedRange(w.map((r) => r[ch.raw])) > 0.04
+    ).length;
+    const localized = rawRiseCount >= 1 && rawRiseCount < MQ_CHANNELS.length;
+    if (co2Rise > 0.12 && localized && Math.abs(tempSlopePerMin) < 0.05) {
       out.push({
         kind: "draft",
         level: "amber",
         title: "Possible disturbance (draft / door / breath near sensor)",
-        detail: `A fast co-rise in CO₂ and an MQ raw channel with no matching temperature trend — typical of someone opening a door or breathing near the sensor. Informational, not a fault.`,
+        detail: `A fast co-rise in CO₂ and ${rawRiseCount} of ${MQ_CHANNELS.length} raw MQ channels, with no matching temperature trend — typical of someone opening a door or breathing near the sensor. Informational only: not a fault, and not a gas trend.`,
       });
     }
   }

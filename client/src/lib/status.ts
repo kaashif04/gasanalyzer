@@ -1,4 +1,4 @@
-import { CO2_PPM, HUMIDITY_PCT, MQ_VOLTAGE, TEMP_C } from "./constants";
+import { CALIBRATED_RANGE, CO2_PPM, HUMIDITY_PCT, MQ_VOLTAGE, TEMP_C } from "./constants";
 import { StatusLevel } from "./types";
 
 /** Visual treatment for each status level. Color is always paired with an
@@ -65,4 +65,17 @@ export function humidityStatus(pct: number): StatusLevel {
   if (pct < HUMIDITY_PCT.min || pct > HUMIDITY_PCT.max) return "fault";
   if (pct > HUMIDITY_PCT.amber) return "drift";
   return "nominal";
+}
+
+/** Whether temp/humidity are inside the envelope the compensation formula was
+ *  actually fit across. Outside this range, *_comp accuracy is unvalidated —
+ *  callers should show a caveat rather than treat comp output with full
+ *  confidence. */
+export function isWithinCalibratedRange(temp_c: number, humidity_pct: number): boolean {
+  return (
+    temp_c >= CALIBRATED_RANGE.tempMin &&
+    temp_c <= CALIBRATED_RANGE.tempMax &&
+    humidity_pct >= CALIBRATED_RANGE.humidityMin &&
+    humidity_pct <= CALIBRATED_RANGE.humidityMax
+  );
 }

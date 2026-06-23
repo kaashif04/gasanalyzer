@@ -98,6 +98,20 @@ Open **http://localhost:5173**.
 
 `.env` is git-ignored — credentials are never committed or hardcoded.
 
+### Keeping a free-tier deployment from losing history
+
+The backend holds all readings in memory only — fast, but it means a process
+restart starts the in-memory history over (it backfills the whole sheet again
+automatically, just not instantly). On Render's free tier, the service spins
+down after ~15 minutes idle, so simply *not visiting the dashboard for a
+while* is enough to trigger this. [`.github/workflows/keep-alive.yml`](.github/workflows/keep-alive.yml)
+pings `/health` every 10 minutes to keep the free instance from ever going
+idle long enough to spin down — update the URL inside it if your Render
+service URL changes. This doesn't protect against Render restarting the
+service for other reasons (a deploy, a crash) — only a real persisted store
+(e.g. a database) would make history survive *those*, which is a bigger
+change than this deployment currently needs.
+
 ---
 
 ## The views

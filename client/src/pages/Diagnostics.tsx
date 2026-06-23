@@ -52,7 +52,7 @@ export default function Diagnostics() {
   const [focusTs, setFocusTs] = useState<number | null>(null);
 
   const corr = useMemo(() => tempCorrelations(readings), [readings]);
-  const spikes = useMemo(() => detectSpikes(readings), [readings]);
+  const { spikes, glitches } = useMemo(() => detectSpikes(readings), [readings]);
   const pairs = useMemo(() => pairAgreements(readings), [readings]);
   const disturbances = useMemo(() => classifyDisturbances(readings), [readings]);
 
@@ -234,7 +234,7 @@ export default function Diagnostics() {
       <section className="space-y-3">
         <SectionTitle
           title="Uncaught spike detector"
-          hint={`|Δ| > ${5}× rolling-median Δ on compensated channels — excludes rows the firmware already flagged.`}
+          hint="|Δ| > 5× rolling-median Δ AND beyond the channel's own measured noise floor — excludes firmware-flagged rows and coincident all-channel glitches (shown separately below)."
         />
         <div className="panel p-4">
           {spikes.length === 0 ? (
@@ -271,6 +271,40 @@ export default function Diagnostics() {
         </div>
       </section>
 
+      {/* Coincident all-channel glitches — distinct from real uncaught spikes */}
+      {glitches.length > 0 && (
+        <section className="space-y-3">
+          <SectionTitle
+            title="Coincident timing glitches"
+            hint="All four channels moved at the same instant — the known recurring electrical/timing artifact, not 4 independent events. Informational, not a fault."
+          />
+          <div className="panel p-4">
+            <ul className="max-h-48 space-y-1.5 overflow-auto pr-1">
+              {glitches.map((g, i) => (
+                <li
+                  key={i}
+                  className="flex items-center justify-between gap-3 rounded-lg bg-info/5 px-3 py-2"
+                >
+                  <div className="flex items-center gap-2.5 text-sm">
+                    <span className="text-info">
+                      <SpikeIcon size={14} />
+                    </span>
+                    <span className="font-medium text-slate-300">All 4 channels</span>
+                    <span className="tnum text-slate-500">{dateTime(g.ts)}</span>
+                  </div>
+                  <button
+                    onClick={() => jumpTo(g.ts)}
+                    className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-xs text-signal hover:bg-signal/10"
+                  >
+                    <JumpIcon size={12} /> view on chart
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      )}
+
       {/* Inline comp chart for jump-to */}
       <section ref={chartRef} className="space-y-3">
         <SectionTitle title="Compensated channels" hint="Reference window for the flags above." />
@@ -299,11 +333,20 @@ export default function Diagnostics() {
                 <Tooltip content={<CompTooltip />} />
                 {spikes.map((s, i) => (
                   <ReferenceLine
-                    key={i}
+                    key={`spike-${i}`}
                     x={s.ts}
                     stroke="#fbbf24"
                     strokeOpacity={0.4}
                     strokeDasharray="3 3"
+                  />
+                ))}
+                {glitches.map((g, i) => (
+                  <ReferenceLine
+                    key={`glitch-${i}`}
+                    x={g.ts}
+                    stroke="#60a5fa"
+                    strokeOpacity={0.35}
+                    strokeDasharray="1 3"
                   />
                 ))}
                 {focusTs != null && (
@@ -325,7 +368,7 @@ export default function Diagnostics() {
               </LineChart>
             </ResponsiveContainer>
           </div>
-          <p className="mt-1 text-[0.65rem] text-slate-600">Volts (compensated). Amber lines = uncaught spikes; teal = selected.</p>
+          <p className="mt-1 text-[0.65rem] text-slate-600">Volts (compensated). Amber lines = uncaught spikes; blue dotted = coincident all-channel glitch; teal = selected.</p>
         </div>
       </section>
     </div>
