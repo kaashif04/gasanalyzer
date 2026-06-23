@@ -47,21 +47,40 @@ function toNumber(value: unknown): number {
   return Number.isNaN(n) ? NaN : n;
 }
 
-/**
- * Turn the raw 2D array from values.get into typed Readings. The first row is
- * treated as the header; we build a name->index map from it so column order in
- * the sheet is irrelevant. Rows with an unparseable timestamp are dropped.
- */
-export function parseRows(values: unknown[][]): Reading[] {
-  if (!values || values.length < 2) return [];
+async function fetchValues(range: string): Promise<unknown[][]> {
+  const url =
+    `${SHEETS_BASE}/${config.sheetId}/values/${encodeURIComponent(range)}` +
+    `?valueRenderOption=UNFORMATTED_VALUE` +
+    `&dateTimeRenderOption=FORMATTED_STRING` +
+    `&key=${config.apiKey}`;
 
-  const header = values[0].map((h) => String(h).trim());
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `Sheets API ${res.status} ${res.statusText}: ${body.slice(0, 300)}`
+    );
+  }
+  const json = (await res.json()) as { values?: unknown[][] };
+  return json.values ?? [];
+}
+
+/** Fetch just the header row, so a column reorder is still caught without
+ *  paying to re-fetch the (potentially huge, ever-growing) data rows. */
+export async function fetchHeader(): Promise<string[]> {
+  const values = await fetchValues(`${config.sheetRange}!1:1`);
+  return (values[0] ?? []).map((h) => String(h).trim());
+}
+
+/** Turn raw data rows (no header row included) into typed Readings, given an
+ *  already-fetched header for the name→index map. Rows with an unparseable
+ *  timestamp are dropped. */
+function parseDataRows(values: unknown[][], header: string[]): Reading[] {
   const idx: Record<string, number> = {};
   header.forEach((name, i) => {
     idx[name] = i;
   });
 
-  // Verify every expected column is present; warn loudly if not.
   const missing = COLUMNS.filter((c) => !(c in idx));
   if (missing.length) {
     console.warn(
@@ -70,8 +89,7 @@ export function parseRows(values: unknown[][]): Reading[] {
   }
 
   const readings: Reading[] = [];
-  for (let r = 1; r < values.length; r++) {
-    const row = values[r];
+  for (const row of values) {
     if (!row || row.length === 0) continue;
 
     const ts = parseTimestamp(row[idx["timestamp"]]);
@@ -94,25 +112,28 @@ export function parseRows(values: unknown[][]): Reading[] {
   return readings;
 }
 
-/**
- * Fetch the entire Data range and return parsed Readings. Uses UNFORMATTED_VALUE
- * so numeric columns arrive as numbers, with datetimes as strings.
- */
-export async function fetchReadings(): Promise<Reading[]> {
-  const range = encodeURIComponent(config.sheetRange);
-  const url =
-    `${SHEETS_BASE}/${config.sheetId}/values/${range}` +
-    `?valueRenderOption=UNFORMATTED_VALUE` +
-    `&dateTimeRenderOption=FORMATTED_STRING` +
-    `&key=${config.apiKey}`;
+export interface DataRowsResult {
+  readings: Reading[];
+  /** Raw row count consumed from the range, BEFORE dropping any rows with an
+   *  unparseable timestamp. The caller must advance its row cursor by this,
+   *  not by readings.length — otherwise a single bad row would desync the
+   *  cursor from the sheet's real row numbers and we'd keep re-requesting
+   *  the same range forever. */
+  rawRowCount: number;
+}
 
-  const res = await fetch(url);
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(
-      `Sheets API ${res.status} ${res.statusText}: ${body.slice(0, 300)}`
-    );
-  }
-  const json = (await res.json()) as { values?: unknown[][] };
-  return parseRows(json.values ?? []);
+/**
+ * Fetch data rows starting at 1-indexed data-row number `fromDataRow` (1 = the
+ * first row after the header — pass 1 to pull the whole sheet). Used
+ * incrementally: the store tracks how many data rows it has already
+ * ingested and only asks for what's new, so a poll cycle's cost stays
+ * roughly constant (one new row) instead of growing with the sheet forever.
+ */
+export async function fetchDataRows(
+  header: string[],
+  fromDataRow = 1
+): Promise<DataRowsResult> {
+  const startSheetRow = fromDataRow + 1; // +1 to skip the header row
+  const values = await fetchValues(`${config.sheetRange}!A${startSheetRow}:M`);
+  return { readings: parseDataRows(values, header), rawRowCount: values.length };
 }

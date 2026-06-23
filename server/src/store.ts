@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { fetchReadings } from "./sheets.js";
+import { fetchDataRows, fetchHeader } from "./sheets.js";
 import { generateHistory, generateOne, MOCK_STEP_MS } from "./mock.js";
 import { Reading } from "./types.js";
 
@@ -11,6 +11,12 @@ import { Reading } from "./types.js";
 class ReadingStore {
   private readings: Reading[] = [];
   private byTs = new Set<number>();
+  /** How many data rows (excluding header) we've already pulled from the
+   *  sheet. Lets each poll ask for only what's new instead of re-fetching
+   *  and re-parsing the whole, ever-growing sheet every cycle. Resets to 0
+   *  on process restart, at which point the next poll naturally re-pulls
+   *  everything once. */
+  private ingestedDataRows = 0;
 
   lastPollOk = false;
   lastError: string | null = null;
@@ -55,14 +61,22 @@ class ReadingStore {
 
   private async pollSheet(): Promise<void> {
     try {
-      const rows = await fetchReadings();
-      // Re-fetching the whole sheet each cycle; merge keeps it idempotent.
-      this.byTs.clear();
-      this.readings = [];
-      this.merge(rows);
+      const header = await fetchHeader();
+      const { readings, rawRowCount } = await fetchDataRows(
+        header,
+        this.ingestedDataRows + 1
+      );
+      // Additive: never wipe what we already hold. A transient fetch error
+      // leaves existing in-memory history untouched (see catch below), and a
+      // successful poll only ever costs what's actually new (normally one
+      // row), not the whole sheet. Advance by the RAW row count, not the
+      // parsed count, so a single bad-timestamp row can't desync the cursor
+      // from the sheet's real row numbers.
+      const added = this.merge(readings);
+      this.ingestedDataRows += rawRowCount;
       this.lastPollOk = true;
       this.lastError = null;
-      if (rows.length) this.lastIngestAt = Date.now();
+      if (added) this.lastIngestAt = Date.now();
     } catch (err) {
       this.lastPollOk = false;
       this.lastError = err instanceof Error ? err.message : String(err);
