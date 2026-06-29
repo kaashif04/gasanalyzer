@@ -1,5 +1,5 @@
 import { CALIBRATED_RANGE, CO2_PPM, HUMIDITY_PCT, MQ_VOLTAGE, TEMP_C } from "./constants";
-import { StatusLevel } from "./types";
+import { Reading, StatusLevel } from "./types";
 
 /** Visual treatment for each status level. Color is always paired with an
  *  icon/shape elsewhere in the UI so it never relies on hue alone. */
@@ -67,15 +67,56 @@ export function humidityStatus(pct: number): StatusLevel {
   return "nominal";
 }
 
+export interface CalibRange {
+  tempMin: number;
+  tempMax: number;
+  humidityMin: number;
+  humidityMax: number;
+}
+
+/**
+ * Which temp/RH band a given row's compensation was actually validated
+ * across. Each row carries its own calib_temp_min_c/calib_temp_max_c/
+ * calib_hum_min_pct/calib_hum_max_pct (the observed range during whichever
+ * CALIBRATE run was active when it was logged) — this reads that, per row,
+ * so the check stays correct across a recalibration instead of checking
+ * every row against one fixed-forever band. Falls back to CALIBRATED_RANGE
+ * (the original lab fit) for rows from before the firmware sent this
+ * metadata, or if any of the four fields is missing/NaN.
+ */
+export function activeCalibratedRange(reading: Reading | null | undefined): CalibRange {
+  if (
+    reading &&
+    Number.isFinite(reading.calib_temp_min_c) &&
+    Number.isFinite(reading.calib_temp_max_c) &&
+    Number.isFinite(reading.calib_hum_min_pct) &&
+    Number.isFinite(reading.calib_hum_max_pct)
+  ) {
+    return {
+      tempMin: reading.calib_temp_min_c,
+      tempMax: reading.calib_temp_max_c,
+      humidityMin: reading.calib_hum_min_pct,
+      humidityMax: reading.calib_hum_max_pct,
+    };
+  }
+  return CALIBRATED_RANGE;
+}
+
 /** Whether temp/humidity are inside the envelope the compensation formula was
  *  actually fit across. Outside this range, *_comp accuracy is unvalidated —
  *  callers should show a caveat rather than treat comp output with full
- *  confidence. */
-export function isWithinCalibratedRange(temp_c: number, humidity_pct: number): boolean {
+ *  confidence. Pass the row's own `activeCalibratedRange()` result, not the
+ *  raw CALIBRATED_RANGE constant, so this stays correct across a
+ *  recalibration. */
+export function isWithinCalibratedRange(
+  temp_c: number,
+  humidity_pct: number,
+  range: CalibRange = CALIBRATED_RANGE
+): boolean {
   return (
-    temp_c >= CALIBRATED_RANGE.tempMin &&
-    temp_c <= CALIBRATED_RANGE.tempMax &&
-    humidity_pct >= CALIBRATED_RANGE.humidityMin &&
-    humidity_pct <= CALIBRATED_RANGE.humidityMax
+    temp_c >= range.tempMin &&
+    temp_c <= range.tempMax &&
+    humidity_pct >= range.humidityMin &&
+    humidity_pct <= range.humidityMax
   );
 }

@@ -15,6 +15,20 @@ export interface Reading {
   temp_c: number;
   humidity_pct: number;
   spike_flag: number;
+  /** 1 on the first row logged after a fresh firmware boot, 0 otherwise.
+   *  NaN if the column doesn't exist in the sheet yet (treat as "unknown",
+   *  same as any other missing optional column here). */
+  session_start: number;
+  /** Identifier of whichever compensation calibration was active when this
+   *  row was logged. "" if the column doesn't exist in the sheet yet. */
+  calib_epoch: string;
+  /** Observed temp/RH range during that calibration run — the range
+   *  compensation is actually validated across for THIS row. NaN if not yet
+   *  available. */
+  calib_temp_min_c: number;
+  calib_temp_max_c: number;
+  calib_hum_min_pct: number;
+  calib_hum_max_pct: number;
 }
 
 export interface LatestResponse {

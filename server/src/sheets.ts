@@ -3,6 +3,20 @@ import { COLUMNS, NUMERIC_COLUMNS, Reading } from "./types.js";
 
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 
+/** 1-based column count -> spreadsheet column letter (19 -> "S"). Derived
+ *  from COLUMNS.length rather than hardcoded so adding a column here can't
+ *  silently truncate the fetch range again the way a literal ":M" did. */
+function columnLetter(n: number): string {
+  let s = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+const LAST_COLUMN = columnLetter(COLUMNS.length);
+
 /**
  * Parse a timestamp cell into epoch milliseconds. The ESP32/Apps Script pair
  * may write one of several formats, so we handle the common ones rather than
@@ -114,6 +128,8 @@ function parseDataRows(values: unknown[][], header: string[]): Reading[] {
     const reading: Reading = {
       ts,
       timestamp: String(row[idx["timestamp"]] ?? ""),
+      calib_epoch:
+        idx["calib_epoch"] != null ? String(row[idx["calib_epoch"]] ?? "") : "",
     } as Reading;
 
     for (const col of NUMERIC_COLUMNS) {
@@ -150,6 +166,8 @@ export async function fetchDataRows(
   fromDataRow = 1
 ): Promise<DataRowsResult> {
   const startSheetRow = fromDataRow + 1; // +1 to skip the header row
-  const values = await fetchValues(`${config.sheetRange}!A${startSheetRow}:M`);
+  const values = await fetchValues(
+    `${config.sheetRange}!A${startSheetRow}:${LAST_COLUMN}`
+  );
   return { readings: parseDataRows(values, header), rawRowCount: values.length };
 }

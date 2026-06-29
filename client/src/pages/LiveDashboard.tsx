@@ -4,7 +4,6 @@ import { useLiveData } from "../context/LiveDataContext";
 import { useUnits } from "../context/UnitContext";
 import { useBaselineHistory } from "../hooks/useBaselineHistory";
 import {
-  CALIBRATED_RANGE,
   ENV_COLORS,
   MQ_CHANNELS,
   NOISE_FLOOR_GATE,
@@ -19,6 +18,7 @@ import {
   UNIT_META,
 } from "../lib/units";
 import {
+  activeCalibratedRange,
   co2Status,
   humidityStatus,
   isWithinCalibratedRange,
@@ -30,8 +30,8 @@ import SensorCard, {
   SensorCardBaseline,
   SensorCardModel,
 } from "../components/dashboard/SensorCard";
-import { OfflineIcon } from "../components/common/icons";
-import { ago, fmt } from "../lib/format";
+import { OfflineIcon, StatusIcon } from "../components/common/icons";
+import { ago, calibEpochLabel, clockTime, duration, fmt } from "../lib/format";
 
 /** Converts a raw-unit BaselineResult (volts for MQ, ppm for CO2) into the
  *  display-unit form SensorCard expects, applying the SAME conversion to both
@@ -107,8 +107,18 @@ function Co2UnitToggle() {
 }
 
 export default function LiveDashboard() {
-  const { latest, history1h, isStale, rowAgeMs, freshTick, meta, connected } =
-    useLiveData();
+  const {
+    latest,
+    history1h,
+    isStale,
+    isProlongedStale,
+    resumeInfo,
+    showResumeNotice,
+    rowAgeMs,
+    freshTick,
+    meta,
+    connected,
+  } = useLiveData();
   const { unit, co2Unit, showRaw } = useUnits();
   const { readings: baselineHistory } = useBaselineHistory();
 
@@ -202,6 +212,93 @@ export default function LiveDashboard() {
     ];
   }, [latest, history1h, co2Unit, baselines]);
 
+  // Single derived mode drives the banner below — see ResumeInfo in
+  // LiveDataContext for how "resumed-clean" vs "resumed-unexplained" is
+  // decided (whether the resuming row carried a firmware session_start=1
+  // marker), and PROLONGED_STALE_MS/RESUME_NOTICE_MS in constants.ts for the
+  // timings that separate "normal power cycle" from "actually concerning".
+  type BannerMode =
+    | "offline"
+    | "resumed-clean"
+    | "resumed-unexplained"
+    | "prolonged-stale"
+    | "stale"
+    | "none";
+  const bannerMode: BannerMode = !connected
+    ? "offline"
+    : showResumeNotice && resumeInfo
+    ? resumeInfo.clean
+      ? "resumed-clean"
+      : "resumed-unexplained"
+    : isProlongedStale
+    ? "prolonged-stale"
+    : isStale
+    ? "stale"
+    : "none";
+
+  const BANNER_COPY: Record<
+    Exclude<BannerMode, "none">,
+    { tone: "fault" | "drift" | "nominal"; title: string; body: string }
+  > = {
+    offline: {
+      tone: "fault",
+      title: "Backend unreachable.",
+      body: "Cannot reach the monitor backend. Check that the API server is running.",
+    },
+    "prolonged-stale": {
+      tone: "fault",
+      title: "Feed has gone stale.",
+      body: `No new reading for ${ago(
+        rowAgeMs
+      )} — too long to be a normal power cycle. Check the ESP32/connection.`,
+    },
+    stale: {
+      tone: "drift",
+      title: "No new reading yet.",
+      body: `Last seen ${ago(
+        rowAgeMs
+      )}. Could be a normal power cycle — this will clear on its own once data resumes, or escalate if it continues past 10 minutes.`,
+    },
+    "resumed-clean": {
+      tone: "nominal",
+      title: "Was powered off.",
+      body: `Resumed at ${clockTime(resumeInfo?.resumedAt ?? Date.now())} after a ${duration(
+        resumeInfo?.gapMs ?? 0
+      )} gap — firmware reported a fresh boot, consistent with a normal power cycle.`,
+    },
+    "resumed-unexplained": {
+      tone: "fault",
+      title: "Feed resumed after an unexplained gap.",
+      body: `${duration(
+        resumeInfo?.gapMs ?? 0
+      )} gap with no boot marker seen on the resuming row — may have dropped out without restarting. Worth checking the device/connection.`,
+    },
+  };
+
+  const TONE_STYLE: Record<
+    "fault" | "drift" | "nominal",
+    { border: string; bg: string; text: string; bodyText: string }
+  > = {
+    fault: {
+      border: "border-fault/30",
+      bg: "bg-fault/10",
+      text: "text-fault",
+      bodyText: "text-fault/80",
+    },
+    drift: {
+      border: "border-drift/30",
+      bg: "bg-drift/10",
+      text: "text-drift",
+      bodyText: "text-drift/80",
+    },
+    nominal: {
+      border: "border-nominal/30",
+      bg: "bg-nominal/10",
+      text: "text-nominal",
+      bodyText: "text-nominal/80",
+    },
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -210,26 +307,29 @@ export default function LiveDashboard() {
       />
 
       <AnimatePresence>
-        {(isStale || !connected) && latest && (
+        {bannerMode !== "none" && latest && (
           <motion.div
+            key={bannerMode}
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
-            className="flex items-center gap-3 rounded-xl border border-fault/30 bg-fault/10 px-4 py-3 text-sm text-fault"
+            className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-sm ${
+              TONE_STYLE[BANNER_COPY[bannerMode].tone].border
+            } ${TONE_STYLE[BANNER_COPY[bannerMode].tone].bg} ${
+              TONE_STYLE[BANNER_COPY[bannerMode].tone].text
+            }`}
           >
-            <span className="animate-stalepulse">
-              <OfflineIcon size={18} />
+            <span className={bannerMode === "resumed-clean" ? "" : "animate-stalepulse"}>
+              {bannerMode === "resumed-clean" ? (
+                <StatusIcon level="nominal" size={18} />
+              ) : (
+                <OfflineIcon size={18} />
+              )}
             </span>
             <div>
-              <span className="font-semibold">
-                {connected ? "Feed has gone stale." : "Backend unreachable."}
-              </span>{" "}
-              <span className="text-fault/80">
-                {connected
-                  ? `No new reading for ${ago(
-                      rowAgeMs
-                    )} (>90s = 2 missed cycles). The ESP32 may be offline or the sheet isn't updating.`
-                  : "Cannot reach the monitor backend. Check that the API server is running."}
+              <span className="font-semibold">{BANNER_COPY[bannerMode].title}</span>{" "}
+              <span className={TONE_STYLE[BANNER_COPY[bannerMode].tone].bodyText}>
+                {BANNER_COPY[bannerMode].body}
               </span>
             </div>
           </motion.div>
@@ -237,27 +337,35 @@ export default function LiveDashboard() {
       </AnimatePresence>
 
       <AnimatePresence>
-        {latest && !isWithinCalibratedRange(latest.temp_c, latest.humidity_pct) && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            className="flex items-center gap-3 rounded-xl border border-drift/30 bg-drift/10 px-4 py-3 text-sm text-drift"
-          >
-            <span className="text-lg leading-none">⚠</span>
-            <div>
-              <span className="font-semibold">Outside calibrated compensation range.</span>{" "}
-              <span className="text-drift/80">
-                The per-channel drift compensation was only validated for{" "}
-                {CALIBRATED_RANGE.tempMin}–{CALIBRATED_RANGE.tempMax}°C /{" "}
-                {CALIBRATED_RANGE.humidityMin}–{CALIBRATED_RANGE.humidityMax}% RH.
-                Current conditions ({fmt(latest.temp_c, 1)}°C, {fmt(latest.humidity_pct, 1)}%RH)
-                are outside that range, so compensated readings carry reduced confidence
-                right now — not a fault, just an unvalidated condition.
-              </span>
-            </div>
-          </motion.div>
-        )}
+        {latest &&
+          !isWithinCalibratedRange(
+            latest.temp_c,
+            latest.humidity_pct,
+            activeCalibratedRange(latest)
+          ) && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="flex items-center gap-3 rounded-xl border border-drift/30 bg-drift/10 px-4 py-3 text-sm text-drift"
+            >
+              <span className="text-lg leading-none">⚠</span>
+              <div>
+                <span className="font-semibold">Outside calibrated compensation range.</span>{" "}
+                <span className="text-drift/80">
+                  Current conditions ({fmt(latest.temp_c, 1)}°C, {fmt(latest.humidity_pct, 1)}%RH)
+                  are outside the range observed during {calibEpochLabel(latest.calib_epoch)} (
+                  {fmt(activeCalibratedRange(latest).tempMin, 1)}–
+                  {fmt(activeCalibratedRange(latest).tempMax, 1)}°C /{" "}
+                  {fmt(activeCalibratedRange(latest).humidityMin, 1)}–
+                  {fmt(activeCalibratedRange(latest).humidityMax, 1)}% RH), so compensated
+                  readings carry reduced confidence right now — not a fault, just an
+                  unvalidated condition. Recalibrating in the current room/conditions
+                  (CALIBRATE mode) will refresh this band.
+                </span>
+              </div>
+            </motion.div>
+          )}
       </AnimatePresence>
 
       {!latest ? (

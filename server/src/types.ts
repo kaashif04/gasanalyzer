@@ -17,14 +17,27 @@ export const COLUMNS = [
   "temp_c",
   "humidity_pct",
   "spike_flag",
+  // New as of the session_start / CALIBRATE-mode firmware update — may be
+  // absent on older rows, or until firmware + the Apps Script webhook are
+  // both updated. Missing values parse to NaN/"" like any other optional
+  // column here; every consumer treats that as "not yet known", not an error.
+  "session_start",
+  "calib_epoch",
+  "calib_temp_min_c",
+  "calib_temp_max_c",
+  "calib_hum_min_pct",
+  "calib_hum_max_pct",
 ] as const;
 
 export type ColumnName = (typeof COLUMNS)[number];
 
-/** Numeric sensor columns (everything except timestamp). */
+/** Columns that are text, not numeric. */
+const STRING_COLUMNS = ["timestamp", "calib_epoch"] as const;
+
+/** Numeric sensor columns (everything except the string columns). */
 export const NUMERIC_COLUMNS = COLUMNS.filter(
-  (c) => c !== "timestamp"
-) as Exclude<ColumnName, "timestamp">[];
+  (c) => !(STRING_COLUMNS as readonly string[]).includes(c)
+) as Exclude<ColumnName, (typeof STRING_COLUMNS)[number]>[];
 
 /**
  * A single parsed reading. `timestamp` is normalized to epoch milliseconds
@@ -46,6 +59,23 @@ export interface Reading {
   temp_c: number;
   humidity_pct: number;
   spike_flag: number;
+  /** 1 on the first row logged after a fresh firmware boot, 0 otherwise —
+   *  lets the dashboard tell "was powered off" apart from "silently dropped
+   *  out mid-session". NaN if the column doesn't exist in the sheet yet. */
+  session_start: number;
+  /** Identifier of whichever temp/humidity-compensation calibration was
+   *  active when this row was logged (e.g. "2026-06-23 14:00:00", or
+   *  "lab-fit-2026-06-23" for the original baseline) — keeps historical data
+   *  traceable to its baseline after a later recalibration. "" if the column
+   *  doesn't exist in the sheet yet. */
+  calib_epoch: string;
+  /** Observed temp/RH range during the calib_epoch calibration run — the
+   *  range compensation is actually validated across for THIS row, not a
+   *  fixed one-time-forever band. NaN if not yet available. */
+  calib_temp_min_c: number;
+  calib_temp_max_c: number;
+  calib_hum_min_pct: number;
+  calib_hum_max_pct: number;
 }
 
 export interface LatestResponse {

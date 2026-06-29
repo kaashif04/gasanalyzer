@@ -1,5 +1,4 @@
 import {
-  CALIBRATED_RANGE,
   CORRELATION,
   MQ_CHANNELS,
   NOISE_FLOOR_GATE,
@@ -8,7 +7,8 @@ import {
   SENSOR_PAIRS,
   SPIKE,
 } from "./constants";
-import { isWithinCalibratedRange } from "./status";
+import { activeCalibratedRange, isWithinCalibratedRange } from "./status";
+import { calibEpochLabel } from "./format";
 import { CompKey, Reading, StatusLevel } from "./types";
 
 export type DiagLevel = "green" | "amber" | "red";
@@ -73,21 +73,36 @@ export interface TempCorrelation {
 export function tempCorrelations(rows: Reading[]): TempCorrelation[] {
   const temps = rows.map((r) => r.temp_c);
 
+  // Each row is checked against ITS OWN active calibration range (it carries
+  // that as calib_temp_min_c etc.), not one fixed-forever band — so this
+  // stays correct even if the window spans a recalibration.
   const outsideCount = rows.filter(
-    (r) => !isWithinCalibratedRange(r.temp_c, r.humidity_pct)
+    (r) => !isWithinCalibratedRange(r.temp_c, r.humidity_pct, activeCalibratedRange(r))
   ).length;
   const outsideCalibratedFraction = rows.length ? outsideCount / rows.length : 0;
+
+  // The caveat text quotes the MOST RECENT row's calibration as "current",
+  // per Task 3's wording requirement — relative to the latest calibration,
+  // not a fixed one-time-forever band.
+  const latestRow = rows[rows.length - 1];
+  const currentRange = activeCalibratedRange(latestRow);
+  const epochLabel = latestRow
+    ? calibEpochLabel(latestRow.calib_epoch)
+    : "the current calibration";
+
   // Only worth surfacing once it's a substantial chunk of the window — a
   // stray sample or two outside the band isn't worth a caveat every time.
   const rangeCaveat =
     outsideCalibratedFraction > 0.2
       ? ` Note: ${Math.round(
           outsideCalibratedFraction * 100
-        )}% of this window had temp/humidity outside the ${CALIBRATED_RANGE.tempMin}–${
-          CALIBRATED_RANGE.tempMax
-        }°C / ${CALIBRATED_RANGE.humidityMin}–${
-          CALIBRATED_RANGE.humidityMax
-        }% RH range the compensation formula was fit across — treat this correlation with reduced confidence outside that band.`
+        )}% of this window had temp/humidity outside the range observed during ${epochLabel} (${currentRange.tempMin.toFixed(
+          1
+        )}–${currentRange.tempMax.toFixed(1)}°C / ${currentRange.humidityMin.toFixed(
+          1
+        )}–${currentRange.humidityMax.toFixed(
+          1
+        )}% RH) — treat this correlation with reduced confidence outside that band.`
       : "";
 
   return MQ_CHANNELS.map((ch) => {

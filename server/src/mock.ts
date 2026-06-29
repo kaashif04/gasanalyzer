@@ -100,6 +100,10 @@ function buildReading(t: number, nowSpan: number, endTs: number): Reading {
 
   // Firmware spike: rare, deterministic (~1 in 90 rows).
   const spike_flag = Math.floor(t / STEP_MS) % 90 === 0 ? 1 : 0;
+  // Exactly one synthetic "boot" marker, at the very first row of the
+  // backfill — generateOne() never lands on this instant, so live ticks
+  // never falsely re-flag a boot.
+  const session_start = t === endTs - nowSpan ? 1 : 0;
 
   const round = (v: number, p = 4) => Number(v.toFixed(p));
 
@@ -118,6 +122,12 @@ function buildReading(t: number, nowSpan: number, endTs: number): Reading {
     temp_c: round(temp, 2),
     humidity_pct: round(humidity, 1),
     spike_flag,
+    session_start,
+    calib_epoch: "lab-fit-2026-06-23",
+    calib_temp_min_c: 33.3,
+    calib_temp_max_c: 35.0,
+    calib_hum_min_pct: 53,
+    calib_hum_max_pct: 59,
   };
 }
 

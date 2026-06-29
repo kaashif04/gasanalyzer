@@ -60,3 +60,12 @@ export function axisTime(ts: number, spanMs: number): string {
   if (spanMs <= 6 * 3_600_000) return clockTime(ts).slice(0, 5);
   return dateTime(ts);
 }
+
+/** Plain-language label for a calib_epoch identifier — either the original
+ *  firmware-default "lab-fit-YYYY-MM-DD" or a real CALIBRATE-mode run's
+ *  "YYYY-MM-DD HH:mm:ss" timestamp. */
+export function calibEpochLabel(epoch: string): string {
+  if (!epoch) return "the original lab fit";
+  if (epoch.startsWith("lab-fit-")) return `the original lab fit (${epoch.slice(8)})`;
+  return `the calibration run on ${epoch}`;
+}

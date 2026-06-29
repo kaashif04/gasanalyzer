@@ -10,6 +10,15 @@ import { CompKey, MqSensorType, RawKey } from "./types";
  *  90s = two missed 30s cycles. */
 export const STALE_AFTER_MS = 90_000;
 
+/** An ongoing gap past this long escalates to the full red "offline" alarm
+ *  regardless of cause — a deliberate power-cycle is normal, but silence this
+ *  long without resuming is worth real concern either way. */
+export const PROLONGED_STALE_MS = 10 * 60_000;
+
+/** How long the "resumed after a gap" notice (calm or alarming) stays
+ *  visible once a new row lands, before reverting to no banner at all. */
+export const RESUME_NOTICE_MS = 2 * 60_000;
+
 /** Poll cadence for the live feed from our own backend (not the sheet). */
 export const LIVE_POLL_MS = 5_000;
 
