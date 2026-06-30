@@ -27,6 +27,12 @@ export const COLUMNS = [
   "calib_temp_max_c",
   "calib_hum_min_pct",
   "calib_hum_max_pct",
+  // Periodic status pings sent WHILE CALIBRATE mode is running (not full
+  // sensor rows — most sensor columns are blank on these) so the dashboard
+  // can show "calibration in progress" instead of misreading the 20-minute
+  // gap as a stale/offline fault.
+  "calibrating",
+  "calib_seconds_left",
 ] as const;
 
 export type ColumnName = (typeof COLUMNS)[number];
@@ -76,6 +82,13 @@ export interface Reading {
   calib_temp_max_c: number;
   calib_hum_min_pct: number;
   calib_hum_max_pct: number;
+  /** 1 while CALIBRATE mode is actively running on the device, 0/NaN
+   *  otherwise. These rows are status pings, not full sensor readings —
+   *  expect the *_raw/*_comp/co2_ppm/etc columns to be blank on them. */
+  calibrating: number;
+  /** Seconds remaining in the current CALIBRATE run, only meaningful when
+   *  calibrating === 1. */
+  calib_seconds_left: number;
 }
 
 export interface LatestResponse {

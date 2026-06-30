@@ -4,6 +4,7 @@ import { useLiveData } from "../context/LiveDataContext";
 import { useUnits } from "../context/UnitContext";
 import { useBaselineHistory } from "../hooks/useBaselineHistory";
 import {
+  CALIBRATING_PING_STALE_MS,
   ENV_COLORS,
   MQ_CHANNELS,
   NOISE_FLOOR_GATE,
@@ -219,13 +220,24 @@ export default function LiveDashboard() {
   // timings that separate "normal power cycle" from "actually concerning".
   type BannerMode =
     | "offline"
+    | "calibrating"
     | "resumed-clean"
     | "resumed-unexplained"
     | "prolonged-stale"
     | "stale"
     | "none";
+
+  // Trust "calibration in progress" only while its status ping is itself
+  // still fresh — see CALIBRATING_PING_STALE_MS. A stale calibrating=1 row
+  // (pings stopped, e.g. WiFi died mid-run) correctly falls through to the
+  // normal stale/offline checks below instead of staying falsely calm.
+  const isCalibratingFresh =
+    latest?.calibrating === 1 && rowAgeMs != null && rowAgeMs < CALIBRATING_PING_STALE_MS;
+
   const bannerMode: BannerMode = !connected
     ? "offline"
+    : isCalibratingFresh
+    ? "calibrating"
     : showResumeNotice && resumeInfo
     ? resumeInfo.clean
       ? "resumed-clean"
@@ -238,12 +250,22 @@ export default function LiveDashboard() {
 
   const BANNER_COPY: Record<
     Exclude<BannerMode, "none">,
-    { tone: "fault" | "drift" | "nominal"; title: string; body: string }
+    { tone: "fault" | "drift" | "nominal" | "info"; title: string; body: string }
   > = {
     offline: {
       tone: "fault",
       title: "Backend unreachable.",
       body: "Cannot reach the monitor backend. Check that the API server is running.",
+    },
+    calibrating: {
+      tone: "info",
+      title: "Calibration in progress.",
+      body:
+        latest && Number.isFinite(latest.calib_seconds_left)
+          ? `The unit is running CALIBRATE mode in clean air — about ${duration(
+              latest.calib_seconds_left * 1000
+            )} remaining. Normal logging resumes automatically when it finishes.`
+          : "The unit is running CALIBRATE mode in clean air. Normal logging resumes automatically when it finishes.",
     },
     "prolonged-stale": {
       tone: "fault",
@@ -276,7 +298,7 @@ export default function LiveDashboard() {
   };
 
   const TONE_STYLE: Record<
-    "fault" | "drift" | "nominal",
+    "fault" | "drift" | "nominal" | "info",
     { border: string; bg: string; text: string; bodyText: string }
   > = {
     fault: {
@@ -296,6 +318,12 @@ export default function LiveDashboard() {
       bg: "bg-nominal/10",
       text: "text-nominal",
       bodyText: "text-nominal/80",
+    },
+    info: {
+      border: "border-info/30",
+      bg: "bg-info/10",
+      text: "text-info",
+      bodyText: "text-info/80",
     },
   };
 
@@ -319,9 +347,19 @@ export default function LiveDashboard() {
               TONE_STYLE[BANNER_COPY[bannerMode].tone].text
             }`}
           >
-            <span className={bannerMode === "resumed-clean" ? "" : "animate-stalepulse"}>
+            <span
+              className={
+                bannerMode === "resumed-clean" || bannerMode === "calibrating"
+                  ? ""
+                  : "animate-stalepulse"
+              }
+            >
               {bannerMode === "resumed-clean" ? (
                 <StatusIcon level="nominal" size={18} />
+              ) : bannerMode === "calibrating" ? (
+                <span className="text-lg leading-none" aria-hidden>
+                  ⚙
+                </span>
               ) : (
                 <OfflineIcon size={18} />
               )}
@@ -338,6 +376,13 @@ export default function LiveDashboard() {
 
       <AnimatePresence>
         {latest &&
+          // Finite check first: a calibrating=1 status ping (or any other
+          // row missing temp/humidity) has NaN here, and NaN fails every
+          // comparison — without this guard the range check would always
+          // read "outside calibrated range" and show a garbled "(—°C,
+          // —%RH)" banner for a row that simply has no reading at all yet.
+          Number.isFinite(latest.temp_c) &&
+          Number.isFinite(latest.humidity_pct) &&
           !isWithinCalibratedRange(
             latest.temp_c,
             latest.humidity_pct,
@@ -370,6 +415,13 @@ export default function LiveDashboard() {
 
       {!latest ? (
         <EmptyState mock={meta?.source === "mock"} />
+      ) : bannerMode === "calibrating" ? (
+        // Sensor columns are blank on calibrating=1 status pings (it's not
+        // really "no data", it's "not measuring gas right now on purpose") —
+        // a grid of blank/NaN cards here would look broken, not informative,
+        // so show a dedicated panel instead. Cards return automatically the
+        // moment normal logging resumes.
+        <CalibratingPanel secondsLeft={latest.calib_seconds_left} />
       ) : (
         <>
           <section>
@@ -428,6 +480,40 @@ function EmptyState({ mock }: { mock?: boolean }) {
       </p>
       <p className="mt-1 text-xs text-slate-600">
         The backend polls every 30 seconds.
+      </p>
+    </div>
+  );
+}
+
+function CalibratingPanel({ secondsLeft }: { secondsLeft: number }) {
+  // Cosmetic only — matches the firmware's CALIB_DURATION_MS (45 min) for a
+  // sensible progress-bar fill; a firmware-side change to that duration
+  // would just make this bar's fill percentage slightly off, nothing breaks.
+  const TOTAL_SECONDS = 45 * 60;
+  const hasCountdown = Number.isFinite(secondsLeft);
+  const progressPct = hasCountdown
+    ? Math.max(0, Math.min(100, ((TOTAL_SECONDS - secondsLeft) / TOTAL_SECONDS) * 100))
+    : 30;
+
+  return (
+    <div className="panel grid place-items-center px-6 py-16 text-center">
+      <span className="mb-3 text-3xl" aria-hidden>
+        ⚙
+      </span>
+      <p className="text-sm font-medium text-slate-200">Calibrating in clean air…</p>
+      <p className="mt-1 text-xs text-slate-500">
+        {hasCountdown
+          ? `~${duration(secondsLeft * 1000)} remaining`
+          : "Sensor readings are paused until this finishes."}
+      </p>
+      <div className="mt-4 h-2 w-48 overflow-hidden rounded-full bg-ink-700">
+        <div
+          className="h-full bg-info/70 transition-all duration-1000"
+          style={{ width: `${progressPct}%` }}
+        />
+      </div>
+      <p className="mt-4 max-w-xs text-xs text-slate-600">
+        Live sensor cards return automatically once normal logging resumes.
       </p>
     </div>
   );

@@ -29,6 +29,13 @@ export interface Reading {
   calib_temp_max_c: number;
   calib_hum_min_pct: number;
   calib_hum_max_pct: number;
+  /** 1 while CALIBRATE mode is actively running on the device, 0/NaN
+   *  otherwise. These rows are status pings, not full sensor readings —
+   *  expect the *_raw/*_comp/co2_ppm/etc columns to be blank on them. */
+  calibrating: number;
+  /** Seconds remaining in the current CALIBRATE run, only meaningful when
+   *  calibrating === 1. */
+  calib_seconds_left: number;
 }
 
 export interface LatestResponse {

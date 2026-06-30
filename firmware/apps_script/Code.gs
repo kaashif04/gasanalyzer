@@ -9,7 +9,10 @@
  * firmware boot - lets the dashboard tell "was powered off" apart from "was
  * supposed to be running and silently stopped"), and which compensation
  * calibration (calib_epoch + its observed temp/RH range) was active when
- * this row was logged.
+ * this row was logged. Also accepts periodic "calibrating" status pings
+ * sent WHILE a CALIBRATE run is in progress (calibrating=1, most other
+ * columns blank) so the dashboard can show that instead of misreading the
+ * 20-minute gap as the device being offline.
  *
  * SETUP (same as before - re-deploy after pasting this):
  *   1. Open your Google Sheet.
@@ -39,7 +42,10 @@ var REQUIRED_HEADER = [
   "co2_ppm", "temp_c", "humidity_pct", "spike_flag",
   "session_start", "calib_epoch",
   "calib_temp_min_c", "calib_temp_max_c",
-  "calib_hum_min_pct", "calib_hum_max_pct"
+  "calib_hum_min_pct", "calib_hum_max_pct",
+  // Periodic status pings sent WHILE CALIBRATE mode is running - most other
+  // columns are blank on these rows, see numOrBlank() below.
+  "calibrating", "calib_seconds_left"
 ];
 
 /** Adds any REQUIRED_HEADER columns missing from row 1, appended after
@@ -98,17 +104,22 @@ function doGet(e) {
 
     var values = {
       timestamp: ts,
-      mq4_1_raw: Number(p.mq4_1r), mq4_2_raw: Number(p.mq4_2r),
-      mq8_1_raw: Number(p.mq8_1r), mq8_2_raw: Number(p.mq8_2r),
-      mq4_1_comp: Number(p.mq4_1c), mq4_2_comp: Number(p.mq4_2c),
-      mq8_1_comp: Number(p.mq8_1c), mq8_2_comp: Number(p.mq8_2c),
-      co2_ppm: Number(p.co2),
-      temp_c: Number(p.temp), humidity_pct: Number(p.hum),
+      // numOrBlank (not Number()) for every sensor field, since a
+      // CALIBRATE-mode status ping sends none of these - they should land
+      // as blank cells, not 0 or the literal string "NaN".
+      mq4_1_raw: numOrBlank(p.mq4_1r), mq4_2_raw: numOrBlank(p.mq4_2r),
+      mq8_1_raw: numOrBlank(p.mq8_1r), mq8_2_raw: numOrBlank(p.mq8_2r),
+      mq4_1_comp: numOrBlank(p.mq4_1c), mq4_2_comp: numOrBlank(p.mq4_2c),
+      mq8_1_comp: numOrBlank(p.mq8_1c), mq8_2_comp: numOrBlank(p.mq8_2c),
+      co2_ppm: numOrBlank(p.co2),
+      temp_c: numOrBlank(p.temp), humidity_pct: numOrBlank(p.hum),
       spike_flag: Number(p.spike) || 0,
       session_start: Number(p.sess) || 0,
       calib_epoch: p.epoch || "",
       calib_temp_min_c: numOrBlank(p.tmin), calib_temp_max_c: numOrBlank(p.tmax),
-      calib_hum_min_pct: numOrBlank(p.hmin), calib_hum_max_pct: numOrBlank(p.hmax)
+      calib_hum_min_pct: numOrBlank(p.hmin), calib_hum_max_pct: numOrBlank(p.hmax),
+      calibrating: Number(p.calib) || 0,
+      calib_seconds_left: numOrBlank(p.secleft)
     };
 
     // Build the row sized to the sheet's actual current column count,

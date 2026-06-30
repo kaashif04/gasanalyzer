@@ -18,6 +18,7 @@ import { CORRELATION } from "../lib/constants";
 import {
   classifyDisturbances,
   detectSpikes,
+  lastContinuousSegment,
   overallHealth,
   pairAgreements,
   statusToDiag,
@@ -30,7 +31,7 @@ import {
   mqStatus,
   tempStatus,
 } from "../lib/status";
-import { axisTime, clockTime, dateTime, fmt } from "../lib/format";
+import { axisTime, clockTime, dateTime, duration, fmt } from "../lib/format";
 import { worst } from "../lib/diagnostics";
 import RangePicker from "../components/common/RangePicker";
 import HealthBadge from "../components/common/HealthBadge";
@@ -51,10 +52,24 @@ export default function Diagnostics() {
   const chartRef = useRef<HTMLDivElement>(null);
   const [focusTs, setFocusTs] = useState<number | null>(null);
 
-  const corr = useMemo(() => tempCorrelations(readings), [readings]);
-  const { spikes, glitches } = useMemo(() => detectSpikes(readings), [readings]);
-  const pairs = useMemo(() => pairAgreements(readings), [readings]);
-  const disturbances = useMemo(() => classifyDisturbances(readings), [readings]);
+  // The device is intentionally power-cycled, so a selected range can easily
+  // span a multi-hour/day gap. Every diagnostic below runs on just the most
+  // recent continuous run since the last such gap — see
+  // lastContinuousSegment() for why blending across one produces misleading
+  // deltas/correlations rather than real sensor behavior.
+  const segment = useMemo(() => lastContinuousSegment(readings), [readings]);
+  const trimmedCount = readings.length - segment.length;
+  // The gap that triggered the trim, i.e. the boundary lastContinuousSegment
+  // split on — only meaningful/read when trimmedCount > 0.
+  const trimmedGapMs =
+    trimmedCount > 0
+      ? readings[trimmedCount].ts - readings[trimmedCount - 1].ts
+      : 0;
+
+  const corr = useMemo(() => tempCorrelations(segment), [segment]);
+  const { spikes, glitches } = useMemo(() => detectSpikes(segment), [segment]);
+  const pairs = useMemo(() => pairAgreements(segment), [segment]);
+  const disturbances = useMemo(() => classifyDisturbances(segment), [segment]);
 
   // Live status rolled into a diag level for the overall badge.
   const liveDiag: DiagLevel = useMemo(() => {
@@ -75,12 +90,12 @@ export default function Diagnostics() {
 
   const chartData = useMemo(
     () =>
-      readings.map((r) => {
+      segment.map((r) => {
         const row: Record<string, number> = { ts: r.ts };
         for (const ch of MQ_CHANNELS) row[ch.id] = r[ch.comp];
         return row;
       }),
-    [readings]
+    [segment]
   );
 
   const jumpTo = (ts: number) => {
@@ -96,6 +111,24 @@ export default function Diagnostics() {
         right={<RangePicker valueMs={rangeMs} onChange={setRangeMs} />}
       />
 
+      {trimmedCount > 0 && (
+        <div className="flex items-center gap-3 rounded-xl border border-info/30 bg-info/10 px-4 py-3 text-sm text-info">
+          <span className="text-lg leading-none" aria-hidden>
+            ⏱
+          </span>
+          <div>
+            <span className="font-semibold">Showing the current run only.</span>{" "}
+            <span className="text-info/80">
+              Your selected range includes a power-off gap of {duration(trimmedGapMs)} —{" "}
+              {trimmedCount} row{trimmedCount === 1 ? "" : "s"} from before it are excluded from
+              every check below (comparing across a power-off as if it were a normal ~30s step would
+              produce misleading spikes/correlations). Switch to Trends to see the full unsegmented
+              history.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Overall health */}
       <div className="panel flex flex-wrap items-center justify-between gap-4 p-4">
         <div className="flex items-center gap-4">
@@ -103,7 +136,12 @@ export default function Diagnostics() {
           <div className="text-sm text-slate-400">
             <div className="font-medium text-slate-300">Overall data health</div>
             <div className="text-xs text-slate-500">
-              Worst-of rollup across all checks below · {loading ? "loading…" : `${readings.length} pts in window`}
+              Worst-of rollup across all checks below ·{" "}
+              {loading
+                ? "loading…"
+                : `${segment.length} pts in current run${
+                    trimmedCount > 0 ? ` (${trimmedCount} earlier pts excluded — see above)` : ""
+                  }`}
             </div>
           </div>
         </div>

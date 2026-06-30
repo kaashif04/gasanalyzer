@@ -1,5 +1,6 @@
 import {
   CORRELATION,
+  DIAGNOSTICS_GAP_MS,
   MQ_CHANNELS,
   NOISE_FLOOR_GATE,
   NOISE_FLOOR_V,
@@ -12,6 +13,27 @@ import { calibEpochLabel } from "./format";
 import { CompKey, Reading, StatusLevel } from "./types";
 
 export type DiagLevel = "green" | "amber" | "red";
+
+/**
+ * Restricts `rows` (assumed ascending by ts) to the most recent continuous
+ * run — i.e. trims off anything before the LAST gap exceeding
+ * DIAGNOSTICS_GAP_MS. The device is intentionally power-cycled, so a
+ * selected time range can easily span a multi-hour/day power-off; comparing
+ * the reading right before that gap against the reading right after, as if
+ * they were normal consecutive ~30s samples, produces misleading deltas,
+ * correlations, and trend windows that reflect the gap itself rather than
+ * real sensor behavior. Every diagnostic in this file should be run on the
+ * output of this, never on a raw, potentially gap-spanning array.
+ */
+export function lastContinuousSegment(rows: Reading[]): Reading[] {
+  if (rows.length < 2) return rows;
+  for (let i = rows.length - 1; i > 0; i--) {
+    if (rows[i].ts - rows[i - 1].ts > DIAGNOSTICS_GAP_MS) {
+      return rows.slice(i);
+    }
+  }
+  return rows;
+}
 
 /** Worst-of rollup helper. */
 const RANK: Record<DiagLevel, number> = { green: 0, amber: 1, red: 2 };
@@ -70,40 +92,55 @@ export interface TempCorrelation {
   outsideCalibratedFraction: number;
 }
 
-export function tempCorrelations(rows: Reading[]): TempCorrelation[] {
-  const temps = rows.map((r) => r.temp_c);
-
-  // Each row is checked against ITS OWN active calibration range (it carries
-  // that as calib_temp_min_c etc.), not one fixed-forever band — so this
-  // stays correct even if the window spans a recalibration.
+/**
+ * What fraction of a window's rows were outside THEIR OWN active calibration
+ * range (each row carries its own calib_temp_min_c etc., so this stays
+ * correct across a recalibration), plus the range/epoch label to quote —
+ * shared by every diagnostic below whose reliability degrades when
+ * conditions are this far into unvalidated extrapolation territory.
+ * Returns null if it's not a big enough fraction to be worth a caveat (a
+ * stray sample or two outside the band isn't worth flagging every time).
+ */
+function calibrationCaveatInfo(
+  rows: Reading[]
+): { fraction: number; range: ReturnType<typeof activeCalibratedRange>; epochLabel: string } | null {
+  if (!rows.length) return null;
   const outsideCount = rows.filter(
     (r) => !isWithinCalibratedRange(r.temp_c, r.humidity_pct, activeCalibratedRange(r))
   ).length;
-  const outsideCalibratedFraction = rows.length ? outsideCount / rows.length : 0;
+  const fraction = outsideCount / rows.length;
+  if (fraction <= 0.2) return null;
 
-  // The caveat text quotes the MOST RECENT row's calibration as "current",
-  // per Task 3's wording requirement — relative to the latest calibration,
-  // not a fixed one-time-forever band.
+  // Quotes the MOST RECENT row's calibration as "current" — relative to the
+  // latest calibration, not a fixed one-time-forever band.
   const latestRow = rows[rows.length - 1];
-  const currentRange = activeCalibratedRange(latestRow);
-  const epochLabel = latestRow
-    ? calibEpochLabel(latestRow.calib_epoch)
-    : "the current calibration";
+  return {
+    fraction,
+    range: activeCalibratedRange(latestRow),
+    epochLabel: calibEpochLabel(latestRow.calib_epoch),
+  };
+}
 
-  // Only worth surfacing once it's a substantial chunk of the window — a
-  // stray sample or two outside the band isn't worth a caveat every time.
-  const rangeCaveat =
-    outsideCalibratedFraction > 0.2
-      ? ` Note: ${Math.round(
-          outsideCalibratedFraction * 100
-        )}% of this window had temp/humidity outside the range observed during ${epochLabel} (${currentRange.tempMin.toFixed(
-          1
-        )}–${currentRange.tempMax.toFixed(1)}°C / ${currentRange.humidityMin.toFixed(
-          1
-        )}–${currentRange.humidityMax.toFixed(
-          1
-        )}% RH) — treat this correlation with reduced confidence outside that band.`
-      : "";
+function formatCalibRange(range: { tempMin: number; tempMax: number; humidityMin: number; humidityMax: number }): string {
+  return `${range.tempMin.toFixed(1)}–${range.tempMax.toFixed(1)}°C / ${range.humidityMin.toFixed(
+    1
+  )}–${range.humidityMax.toFixed(1)}% RH`;
+}
+
+export function tempCorrelations(rows: Reading[]): TempCorrelation[] {
+  const temps = rows.map((r) => r.temp_c);
+  const caveatInfo = calibrationCaveatInfo(rows);
+  const outsideCalibratedFraction = caveatInfo?.fraction ?? 0;
+
+  const rangeCaveat = caveatInfo
+    ? ` Note: ${Math.round(
+        caveatInfo.fraction * 100
+      )}% of this window had temp/humidity outside the range observed during ${
+        caveatInfo.epochLabel
+      } (${formatCalibRange(
+        caveatInfo.range
+      )}) — treat this correlation with reduced confidence outside that band.`
+    : "";
 
   return MQ_CHANNELS.map((ch) => {
     const series = rows.map((r) => r[ch.comp]);
@@ -271,6 +308,26 @@ export interface PairAgreement {
 }
 
 export function pairAgreements(rows: Reading[]): PairAgreement[] {
+  // A ratio breach this check flags as "possible single-sensor fault" can
+  // also be produced by BOTH siblings drifting together under heavy
+  // calibration extrapolation (their individual a/b/c coefficients respond
+  // differently to the same out-of-range conditions) — not just by one
+  // sensor actually failing. This check alone can't tell those apart (it's a
+  // simple ratio threshold, deliberately simpler than classifyDisturbances'
+  // asymmetry-aware sensor-fault check below), so when conditions are mostly
+  // outside the calibrated range, say so rather than implying confidence the
+  // check doesn't have.
+  const caveatInfo = calibrationCaveatInfo(rows);
+  const pairCaveat = caveatInfo
+    ? ` Note: ${Math.round(
+        caveatInfo.fraction * 100
+      )}% of this window was outside the range observed during ${
+        caveatInfo.epochLabel
+      } (${formatCalibRange(
+        caveatInfo.range
+      )}) — this divergence may reflect unvalidated compensation extrapolation rather than a real hardware fault.`
+    : "";
+
   return SENSOR_PAIRS.map(({ sensor, gasName, a, b }) => {
     const series = rows
       .map((r) => {
@@ -292,12 +349,12 @@ export function pairAgreements(rows: Reading[]): PairAgreement[] {
       level = "amber";
       note = `${pairLabel} pair diverging (ratio ${ratio.toFixed(
         2
-      )}) — monitor for a developing fault.`;
+      )}) — monitor for a developing fault.${pairCaveat}`;
     } else {
       level = "red";
       note = `${pairLabel} pair ratio ${ratio.toFixed(
         2
-      )} is outside its established range — possible single-sensor fault.`;
+      )} is outside its established range — possible single-sensor fault.${pairCaveat}`;
     }
     return {
       sensor,
@@ -401,11 +458,21 @@ export function classifyDisturbances(
     // One sibling moved meaningfully, the separation grew, the other held.
     if (sep > 0.08 && moverChange > 3 * (stayChange + 1e-3) && moverChange > 0.08) {
       const mover = aChange >= bChange ? a : b;
+      const faultCaveatInfo = calibrationCaveatInfo(w);
+      const faultCaveat = faultCaveatInfo
+        ? ` Note: ${Math.round(
+            faultCaveatInfo.fraction * 100
+          )}% of this window was outside the range observed during ${
+            faultCaveatInfo.epochLabel
+          } (${formatCalibRange(
+            faultCaveatInfo.range
+          )}) — confirm this isn't unvalidated compensation extrapolation before assuming hardware failure.`
+        : "";
       out.push({
         kind: "sensor-fault",
         level: "red",
         title: "Possible sensor fault",
-        detail: `${mover.label} is diverging from its sibling on the ${gasName} (${sensor}) pair while the other reads normally — this pattern suggests hardware failure rather than environment. Investigate the sensor.`,
+        detail: `${mover.label} is diverging from its sibling on the ${gasName} (${sensor}) pair while the other reads normally — this pattern suggests hardware failure rather than environment. Investigate the sensor.${faultCaveat}`,
       });
     }
   }

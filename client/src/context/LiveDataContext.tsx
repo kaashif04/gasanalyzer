@@ -87,7 +87,10 @@ export function LiveDataProvider({ children }: { children: ReactNode }) {
               setResumeInfo({
                 resumedAt: incomingTs,
                 gapMs: incomingTs - priorTs,
-                clean: res.reading.session_start === 1,
+                // A boot straight into CALIBRATE mode (no session_start=1
+                // row, since that's only sent by normal logging) is just as
+                // explained/non-concerning as a normal clean boot.
+                clean: res.reading.session_start === 1 || res.reading.calibrating === 1,
               });
             }
             setPrevious((p) => (latestRef.current ?? p));

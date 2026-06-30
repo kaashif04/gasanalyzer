@@ -34,6 +34,13 @@
         auto-calibrating in the background would risk learning an
         elevated gas reading as the new "normal" and erasing the
         signal entirely.
+     5. LCD POWER SAVING: the backlight only lights up when the displayed
+        content actually changes, then auto-dims a few seconds later -
+        this runs unattended for hours, so there's no reason to keep a
+        backlight blazing continuously between 30s updates. CALIBRATE
+        mode is the one exception (see runCalibrateMode()) - it's a
+        short, actively-watched mode where staying lit the whole time is
+        exactly what's wanted.
 
    Reads gas + environment sensors, timestamps them, shows a
    live summary on the LCD, saves a fail-safe CSV to the SD card,
@@ -91,8 +98,9 @@ const unsigned long LOG_INTERVAL_MS = 30000UL;   // 30 s between samples
 const unsigned long WIFI_RETRY_MS   = 10000UL;   // how often to retry a dropped link
 
 // CALIBRATE mode config
-const unsigned long CALIB_DURATION_MS = 20UL * 60UL * 1000UL; // 20 min, clean air only
+const unsigned long CALIB_DURATION_MS = 45UL * 60UL * 1000UL; // 45 min, clean air only
 const unsigned long CALIB_SAMPLE_MS   = 5000UL;                // sample every 5s during calibration
+const unsigned long CALIB_PING_INTERVAL_MS = 60UL * 1000UL;    // dashboard status ping cadence
 #define CALIB_BUTTON_PIN 0          // onboard BOOT button, active LOW
 const char* CALIB_FILE = "/calib.cfg";
 // -----------------------------------------------
@@ -118,6 +126,17 @@ const char* CSV_HEADER =
 unsigned long lastLog = 0;
 unsigned long lastWifiAttempt = 0;
 int lcdScreen = 0;   // 0,1,2 - rotates through 3 simple operator-facing screens
+
+// ---- LCD backlight: lit only when the displayed content actually changes,
+// then auto-dims after LCD_BACKLIGHT_ON_MS - this unit runs unattended for
+// hours, so a continuously-blazing backlight between 30s updates is wasted
+// power for no one to see. CALIBRATE mode is exempt (see runCalibrateMode())
+// since that's a short, actively-watched mode where staying lit is wanted. ----
+const unsigned long LCD_BACKLIGHT_ON_MS = 5000UL;
+String lcdLine0Shown = "";
+String lcdLine1Shown = "";
+bool lcdBacklightOn = true;          // matches the initial lcd.backlight() in setup()
+unsigned long lcdBacklightOffAt = 0;
 
 // 1 on the FIRST row logged after this boot, 0 on every row after that. Lets
 // the dashboard tell "device was power-cycled" (gap immediately followed by
@@ -228,6 +247,43 @@ void loadCalibration() {
   Serial.print(" - epoch="); Serial.println(activeEpoch);
 }
 
+// ---------- CALIBRATE mode status ping ----------
+// Sent once at the start of CALIBRATE mode and then every
+// CALIB_PING_INTERVAL_MS during it, so the dashboard can show "calibration
+// in progress" instead of misreading the 20-minute gap as the device being
+// offline (see TASK 1's session_start marker for the same idea applied to a
+// normal power-cycle gap). Single attempt only, not the retry-twice logic
+// sendToSheets() uses for real readings - this is a best-effort heartbeat,
+// not a row that needs to be durably saved; missing one is harmless since
+// another follows within a minute.
+void sendCalibratingPing(unsigned long secondsLeft) {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  DateTime now = rtc.now();
+  char ts[20];
+  snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d",
+           now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+  String tsEnc = String(ts);
+  tsEnc.replace(" ", "%20"); tsEnc.replace(":", "%3A");
+
+  String url = GSCRIPT_URL + "?ts=" + tsEnc + "&calib=1&secleft=" + String(secondsLeft);
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setHandshakeTimeout(15);
+  HTTPClient https;
+  https.setConnectTimeout(8000);
+  https.setTimeout(8000);
+  if (https.begin(client, url)) {
+    https.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    int code = https.GET();
+    Serial.print("[calib ping] HTTP "); Serial.println(code);
+    https.end();
+  } else {
+    Serial.println("[!] [calib ping] https.begin() failed");
+  }
+}
+
 // ---------- CALIBRATE mode ----------
 // Manual, deliberate, clean-air-ONLY recalibration. Never runs automatically
 // or silently - it is only entered by holding the onboard BOOT button for
@@ -248,6 +304,9 @@ void loadCalibration() {
 //   =>  c = mean(V_raw) - a*mean(T) - b*mean(RH)
 void runCalibrateMode() {
   Serial.println("=== ENTERING CALIBRATE MODE ===");
+  lcd.backlight();   // CALIBRATE mode is actively watched, unlike normal
+                      // logging - keep it lit the whole time, no power-saving
+                      // dimming here (see showLcdLines() for normal mode).
   lcd.clear();
   lcd.setCursor(0, 0); lcd.print("** CALIBRATE **");
   lcd.setCursor(0, 1); lcd.print("Clean air only!");
@@ -259,6 +318,12 @@ void runCalibrateMode() {
   // might be off, using whatever the RTC currently has.
   connectWiFi();
   syncRtcFromNtp();
+
+  // Tell the dashboard right away - otherwise it has no way to distinguish
+  // "intentionally calibrating" from "offline", and would show a stale/fault
+  // banner for the whole 20 minutes. See sendCalibratingPing().
+  sendCalibratingPing(CALIB_DURATION_MS / 1000UL);
+  unsigned long lastPing = millis();
 
   double sumT = 0, sumH = 0;
   double sumRaw[4] = {0, 0, 0, 0};
@@ -308,6 +373,12 @@ void runCalibrateMode() {
     lcd.print(remSec);
     lcd.print(" n="); lcd.print(n);
     lcd.print("  ");
+
+    if (millis() - lastPing >= CALIB_PING_INTERVAL_MS) {
+      lastPing = millis();
+      sendCalibratingPing(remaining / 1000UL);
+    }
+
     delay(200);
   }
 
@@ -417,20 +488,37 @@ void setup() {
   loadCalibration();   // override lab-fit intercepts/epoch/range if a saved calibration exists
 
   // ---- CALIBRATE mode gate ----
-  // Hold the onboard BOOT button (GPIO0, active LOW) for the first 2s after
-  // boot to enter CALIBRATE mode instead of normal logging. Released even
-  // briefly during that window cancels it - this is a deliberate, sustained
-  // gesture, not something a momentary bump can trigger by accident.
+  // Gives a full CALIB_GATE_WINDOW_MS (6s) to react to the prompt and START
+  // holding the onboard BOOT button (GPIO0, active LOW) - NOT "must already
+  // be holding before this code even runs", which would be unusable for
+  // anyone who hasn't memorized the exact timing. Within that window, holding
+  // continuously for CALIB_GATE_HOLD_MS (2s) anywhere triggers CALIBRATE mode;
+  // releasing early just resets the hold timer (forgiving of a shaky press),
+  // it does not need to be held from the very start of the window. A
+  // momentary accidental bump can't trigger it - it still needs 2 deliberate
+  // continuous seconds.
   pinMode(CALIB_BUTTON_PIN, INPUT_PULLUP);
-  lcd.setCursor(0, 1); lcd.print("Hold BOOT=CALIB ");
-  bool calibRequested = true;
-  unsigned long holdStart = millis();
-  while (millis() - holdStart < 2000) {
-    if (digitalRead(CALIB_BUTTON_PIN) != LOW) { calibRequested = false; break; }
-    delay(50);
-  }
-  if (calibRequested) {
-    runCalibrateMode();
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Hold BOOT 2s now");
+  lcd.setCursor(0, 1); lcd.print("= CALIBRATE mode");
+  {
+    const unsigned long CALIB_GATE_WINDOW_MS = 6000UL;
+    const unsigned long CALIB_GATE_HOLD_MS   = 2000UL;
+    unsigned long windowStart = millis();
+    unsigned long pressedSince = 0;
+    bool calibRequested = false;
+    while (millis() - windowStart < CALIB_GATE_WINDOW_MS) {
+      if (digitalRead(CALIB_BUTTON_PIN) == LOW) {
+        if (pressedSince == 0) pressedSince = millis();
+        if (millis() - pressedSince >= CALIB_GATE_HOLD_MS) { calibRequested = true; break; }
+      } else {
+        pressedSince = 0;   // released - the hold must be continuous, reset
+      }
+      delay(30);
+    }
+    if (calibRequested) {
+      runCalibrateMode();
+    }
   }
 
   if (WiFi.status() != WL_CONNECTED) {
@@ -439,6 +527,12 @@ void setup() {
   }
   delay(1500);
   lcd.clear();
+  // Reset showLcdLines()'s tracked state to match this physically-cleared
+  // screen, so the FIRST normal-operation update is guaranteed to register
+  // as "changed" (boot/CALIBRATE-mode text doesn't linger in the comparison)
+  // and flashes the backlight on right as normal logging begins.
+  lcdLine0Shown = "";
+  lcdLine1Shown = "";
 }
 
 // ---------- NTP time sync ----------
@@ -579,6 +673,15 @@ float readChannelFiltered(uint8_t adsChannel, int rollIdx, bool &spikeFlagOut) {
 // ---------- main loop ----------
 void loop() {
   ensureWifi();
+
+  // Turn the LCD backlight off once its post-update display window has
+  // elapsed - non-blocking, so this never stalls a sensor read or a Sheets
+  // push. (CALIBRATE mode never reaches this loop - it blocks inside
+  // runCalibrateMode() and stays continuously lit there on purpose.)
+  if (lcdBacklightOn && millis() >= lcdBacklightOffAt) {
+    lcd.noBacklight();
+    lcdBacklightOn = false;
+  }
 
   if (lastLog != 0 && millis() - lastLog < LOG_INTERVAL_MS) return;
   lastLog = millis();
@@ -722,6 +825,26 @@ bool sendToSheets(String tsEnc, float r0, float r1, float r2, float r3,
   return (code > 0 && code < 400);
 }
 
+/** Writes two lines to the LCD only if they differ from what's already
+ *  shown (also avoids needless flicker on an unchanged screen), and lights
+ *  the backlight whenever it does change. The backlight auto-dims after
+ *  LCD_BACKLIGHT_ON_MS - handled non-blockingly back in loop(), so this
+ *  never stalls a sensor read or a Sheets push. */
+void showLcdLines(const String &line0, const String &line1) {
+  bool changed = (line0 != lcdLine0Shown) || (line1 != lcdLine1Shown);
+  if (!changed) return;
+
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print(line0);
+  lcd.setCursor(0, 1); lcd.print(line1);
+  lcdLine0Shown = line0;
+  lcdLine1Shown = line1;
+
+  lcd.backlight();
+  lcdBacklightOn = true;
+  lcdBacklightOffAt = millis() + LCD_BACKLIGHT_ON_MS;
+}
+
 // ---------- LCD: 3 simple, operator-facing screens ----------
 // No decimals, no raw volts, no "compensated" jargon - this is for whoever's
 // standing next to the unit when the phone/app isn't being checked, or when
@@ -731,35 +854,30 @@ bool sendToSheets(String tsEnc, float r0, float r1, float r2, float r3,
 //   Screen 2: system status - WiFi/cloud, SD card, last update
 void updateLCD(int co2, float t, float h, float mq4c, float mq8c,
                bool cloudSent, bool spike, bool sdOk) {
-  lcd.clear();
   lcdScreen = (lcdScreen + 1) % 3;
+  String line0, line1;
 
   if (lcdScreen == 0) {
     float co2pct = (co2 >= 0) ? (co2 / 10000.0f) : -1;   // ppm -> % (10000ppm=1%)
-    lcd.setCursor(0, 0);
-    if (co2 >= 0) { lcd.print("CO2:"); lcd.print(co2); lcd.print("ppm"); }
-    else            lcd.print("CO2: -- (no read)");
-    lcd.setCursor(0, 1);
-    if (co2pct >= 0) { lcd.print(co2pct, 1); lcd.print("%  T:"); lcd.print(t, 0); lcd.print("C"); }
-    else               { lcd.print("T:"); lcd.print(t, 0); lcd.print("C H:"); lcd.print(h, 0); lcd.print("%"); }
+    line0 = (co2 >= 0) ? ("CO2:" + String(co2) + "ppm") : String("CO2: -- (no read)");
+    line1 = (co2pct >= 0)
+              ? (String(co2pct, 1) + "%  T:" + String(t, 0) + "C")
+              : ("T:" + String(t, 0) + "C H:" + String(h, 0) + "%");
 
   } else if (lcdScreen == 1) {
     float p4 = voltsToPercent(mq4c, MQ4_FULLSCALE_V);
     float p8 = voltsToPercent(mq8c, MQ8_FULLSCALE_V);
-    lcd.setCursor(0, 0);
-    lcd.print("MQ4 lvl:");
-    if (p4 >= 0) { lcd.print((int)p4); lcd.print("%"); } else lcd.print("--");
-    lcd.setCursor(0, 1);
-    lcd.print("MQ8 lvl:");
-    if (p8 >= 0) { lcd.print((int)p8); lcd.print("%"); } else lcd.print("--");
-    if (spike) { lcd.setCursor(15, 1); lcd.print("!"); }   // ! = glitch filtered this cycle
+    line0 = "Methane :" + (p4 >= 0 ? (String((int)p4) + "%") : String("--"));
+    line1 = "Hydrogen:" + (p8 >= 0 ? (String((int)p8) + "%") : String("--"));
+    if (spike) {
+      while (line1.length() < 15) line1 += ' ';   // pad out to the "!" column
+      line1 += "!";                                // ! = glitch filtered this cycle
+    }
 
   } else {
-    lcd.setCursor(0, 0);
-    lcd.print("Cloud:"); lcd.print(cloudSent ? "OK  " : "FAIL");
-    lcd.print(" SD:"); lcd.print(sdOk ? "OK" : "ERR");
-    lcd.setCursor(0, 1);
-    lcd.print("WiFi:"); lcd.print(WiFi.status() == WL_CONNECTED ? "OK " : "OFF");
-    lcd.print(" Live");
+    line0 = "Cloud:" + String(cloudSent ? "OK  " : "FAIL") + " SD:" + String(sdOk ? "OK" : "ERR");
+    line1 = "WiFi:" + String(WiFi.status() == WL_CONNECTED ? "OK " : "OFF") + " Live";
   }
+
+  showLcdLines(line0, line1);
 }

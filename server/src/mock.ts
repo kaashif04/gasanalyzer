@@ -128,6 +128,8 @@ function buildReading(t: number, nowSpan: number, endTs: number): Reading {
     calib_temp_max_c: 35.0,
     calib_hum_min_pct: 53,
     calib_hum_max_pct: 59,
+    calibrating: 0,
+    calib_seconds_left: NaN,
   };
 }
 

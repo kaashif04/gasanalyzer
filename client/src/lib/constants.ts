@@ -19,8 +19,25 @@ export const PROLONGED_STALE_MS = 10 * 60_000;
  *  visible once a new row lands, before reverting to no banner at all. */
 export const RESUME_NOTICE_MS = 2 * 60_000;
 
+/** The latest row's calibrating=1 status ping must be at least this fresh to
+ *  trust "calibration in progress" — firmware pings every 60s while
+ *  CALIBRATE mode runs, so anything notably older than that means pings have
+ *  actually stopped (e.g. WiFi died mid-run), and the normal stale/offline
+ *  logic should take over and raise concern instead of staying falsely calm. */
+export const CALIBRATING_PING_STALE_MS = 2 * 60_000;
+
 /** Poll cadence for the live feed from our own backend (not the sheet). */
 export const LIVE_POLL_MS = 5_000;
+
+/** A gap this much larger than the normal ~30s logging cadence means the
+ *  device was off (an intentional power cycle, or CALIBRATE mode), not just
+ *  a slow cycle. Diagnostics treats this as a hard boundary and only
+ *  analyzes the most recent continuous run after the last such gap —
+ *  comparing a reading from right before a multi-hour/day power-off against
+ *  the reading right after, as if they were consecutive samples, produces
+ *  spurious "spikes" and distorted correlations that have nothing to do with
+ *  real sensor behavior. See lastContinuousSegment() in diagnostics.ts. */
+export const DIAGNOSTICS_GAP_MS = 5 * 60_000;
 
 /** MQ channel operating envelope, in volts, on the COMPENSATED channel.
  *  Note: *_comp is a drift-corrected residual (V_raw − (a·T + b·RH + c)), so it
