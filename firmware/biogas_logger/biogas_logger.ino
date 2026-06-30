@@ -98,7 +98,7 @@ const unsigned long LOG_INTERVAL_MS = 30000UL;   // 30 s between samples
 const unsigned long WIFI_RETRY_MS   = 10000UL;   // how often to retry a dropped link
 
 // CALIBRATE mode config
-const unsigned long CALIB_DURATION_MS = 45UL * 60UL * 1000UL; // 45 min, clean air only
+const unsigned long CALIB_DURATION_MS = 30UL * 60UL * 1000UL; // 30 min, clean air only
 const unsigned long CALIB_SAMPLE_MS   = 5000UL;                // sample every 5s during calibration
 const unsigned long CALIB_PING_INTERVAL_MS = 60UL * 1000UL;    // dashboard status ping cadence
 #define CALIB_BUTTON_PIN 0          // onboard BOOT button, active LOW
@@ -185,24 +185,12 @@ float compensate(float vRaw, const CompCoef &k, float tempC, float hum) {
   return vRaw - predicted;
 }
 
-// ---------- Relative "% of sensor range" for the LCD only ----------
-// NOTE: this is NOT a calibrated gas-concentration percentage - we don't have
-// an IWK-validated voltage->ppm curve for the MQ sensors yet. It's a simple,
-// honest "how high is this reading relative to where this sensor type
-// typically operates" indicator for a quick on-site glance, clamped 0-100%.
-// MQ4_FULLSCALE_V / MQ8_FULLSCALE_V are the compensated-voltage swing we've
-// observed/expect this sensor type to span from clean-air to a strong signal;
-// adjust these as real calibration data comes in.
-const float MQ4_FULLSCALE_V = 0.30f;   // compensated volts at "high" methane signal
-const float MQ8_FULLSCALE_V = 0.30f;   // compensated volts at "high" hydrogen signal
-
-float voltsToPercent(float vComp, float fullScaleV) {
-  if (isnan(vComp)) return -1;
-  float pct = (vComp / fullScaleV) * 100.0f;
-  if (pct < 0) pct = 0;
-  if (pct > 100) pct = 100;
-  return pct;
-}
+// voltsToPercent() and MQ*_FULLSCALE_V removed - LCD now shows the actual
+// compensated voltage directly (2 d.p., e.g. "0.12V") so it matches the
+// app's Voltage readout exactly. The old "% of sensor range" display was
+// misleading because the full-scale constant was an arbitrary placeholder;
+// a post-calibration drift of ~0.12V was displaying as 40%+ even with no
+// gas present, causing confusion vs the app's correct numerical readout.
 
 // ---------- ADS1115 read with spike rejection (forward-declared - used by
 // both the normal loop() and runCalibrateMode()) ----------
@@ -850,7 +838,7 @@ void showLcdLines(const String &line0, const String &line1) {
 // standing next to the unit when the phone/app isn't being checked, or when
 // WiFi is down and they need to confirm it's still working and saving data.
 //   Screen 0: CO2 in ppm AND percent
-//   Screen 1: MQ4 / MQ8 relative signal level, as a percent of typical range
+//   Screen 1: Methane / Hydrogen compensated voltage in volts (matches app)
 //   Screen 2: system status - WiFi/cloud, SD card, last update
 void updateLCD(int co2, float t, float h, float mq4c, float mq8c,
                bool cloudSent, bool spike, bool sdOk) {
@@ -865,10 +853,11 @@ void updateLCD(int co2, float t, float h, float mq4c, float mq8c,
               : ("T:" + String(t, 0) + "C H:" + String(h, 0) + "%");
 
   } else if (lcdScreen == 1) {
-    float p4 = voltsToPercent(mq4c, MQ4_FULLSCALE_V);
-    float p8 = voltsToPercent(mq8c, MQ8_FULLSCALE_V);
-    line0 = "Methane :" + (p4 >= 0 ? (String((int)p4) + "%") : String("--"));
-    line1 = "Hydrogen:" + (p8 >= 0 ? (String((int)p8) + "%") : String("--"));
+    // Matches the app's Voltage readout: actual compensated volts, 2 d.p.
+    // "Methane :0.12V" / "Hydrogen:-0.04V" - both fit comfortably in 16 chars
+    // including room for the spike "!" indicator at position 15.
+    line0 = "Methane :" + (!isnan(mq4c) ? (String(mq4c, 2) + "V") : String("--"));
+    line1 = "Hydrogen:" + (!isnan(mq8c) ? (String(mq8c, 2) + "V") : String("--"));
     if (spike) {
       while (line1.length() < 15) line1 += ' ';   // pad out to the "!" column
       line1 += "!";                                // ! = glitch filtered this cycle

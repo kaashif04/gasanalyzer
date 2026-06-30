@@ -5,7 +5,7 @@ Print this page or keep it with the unit. No technical knowledge needed.
 ## When to do this
 
 Whenever the unit is turned on in a **new room, or after being moved**, even
-if it's a room it's been in before. Takes 45 minutes. Do this **before**
+if it's a room it's been in before. Takes 30 minutes. Do this **before**
 introducing any biogas — it must run in clean (normal room) air.
 
 ## Steps
@@ -29,9 +29,9 @@ introducing any biogas — it must run in clean (normal room) air.
    then a few seconds later:
    ```
    CALIBRATING...
-   Left 44:45 n=12
+   Left 29:45 n=12
    ```
-   The `Left MM:SS` counts down from 45:00 to 0:00. **This is how you know
+   The `Left MM:SS` counts down from 30:00 to 0:00. **This is how you know
    it's working** — leave it alone and don't introduce any gas while this is
    counting down.
 5. If you missed the window, nothing bad happens — it just continues into
@@ -47,7 +47,7 @@ introducing any biogas — it must run in clean (normal room) air.
 ## What if something goes wrong
 
 - **"CALIBRATE FAILED / Too few samples"** — the humidity/temperature sensor
-  couldn't get enough good readings during the 45 minutes. Try again; check
+  couldn't get enough good readings during the 30 minutes. Try again; check
   nothing is blocking the small sensor on the side of the unit.
 - **"CALIBRATE: SD / write FAILED"** — the SD card couldn't be written to.
   Check the SD card is inserted properly. The previous calibration is kept

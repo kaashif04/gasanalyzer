@@ -8,6 +8,7 @@ import Trends from "./pages/Trends";
 import Diagnostics from "./pages/Diagnostics";
 import ExportPage from "./pages/Export";
 import Calibrated from "./pages/Calibrated";
+import Summary from "./pages/Summary";
 
 function AnimatedRoutes() {
   const location = useLocation();
@@ -26,6 +27,7 @@ function AnimatedRoutes() {
           <Route path="/diagnostics" element={<Diagnostics />} />
           <Route path="/export" element={<ExportPage />} />
           <Route path="/calibrated" element={<Calibrated />} />
+          <Route path="/summary" element={<Summary />} />
         </Routes>
       </motion.div>
     </AnimatePresence>

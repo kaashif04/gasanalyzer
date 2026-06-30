@@ -22,6 +22,7 @@ const NAV: NavItem[] = [
   { to: "/diagnostics", label: "Diagnostics", icon: I(<><circle cx="9" cy="9" r="6" /><path d="M13.5 13.5L18 18" /></>) },
   { to: "/export", label: "Export", icon: I(<><path d="M10 3v9" /><path d="M6.5 8.5L10 12l3.5-3.5" /><path d="M4 16h12" /></>) },
   { to: "/calibrated", label: "Calibrated", icon: I(<><path d="M4 10h12" /><circle cx="8" cy="10" r="2.2" /><path d="M3 5h14M3 15h14" /></>) },
+  { to: "/summary", label: "Summary", icon: I(<><path d="M4 5h12M4 9h10M4 13h12M4 17h7" /></>) },
 ];
 
 const linkBase =

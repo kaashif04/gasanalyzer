@@ -334,6 +334,21 @@ export default function LiveDashboard() {
         subtitle="Current readings · 1-hour sparklines · compensated by default"
       />
 
+      {latest && latest.calib_epoch && (
+        <p className="-mt-3 text-xs text-slate-500">
+          <span aria-hidden>⚙</span> Last calibrated:{" "}
+          <span className="text-slate-400">{calibEpochLabel(latest.calib_epoch)}</span>
+          {" · validated for "}
+          {(() => {
+            const r = activeCalibratedRange(latest);
+            return `${fmt(r.tempMin, 1)}–${fmt(r.tempMax, 1)}°C / ${fmt(
+              r.humidityMin,
+              1
+            )}–${fmt(r.humidityMax, 1)}% RH`;
+          })()}
+        </p>
+      )}
+
       <AnimatePresence>
         {bannerMode !== "none" && latest && (
           <motion.div
@@ -486,10 +501,10 @@ function EmptyState({ mock }: { mock?: boolean }) {
 }
 
 function CalibratingPanel({ secondsLeft }: { secondsLeft: number }) {
-  // Cosmetic only — matches the firmware's CALIB_DURATION_MS (45 min) for a
+  // Cosmetic only — matches the firmware's CALIB_DURATION_MS (30 min) for a
   // sensible progress-bar fill; a firmware-side change to that duration
   // would just make this bar's fill percentage slightly off, nothing breaks.
-  const TOTAL_SECONDS = 45 * 60;
+  const TOTAL_SECONDS = 30 * 60;
   const hasCountdown = Number.isFinite(secondsLeft);
   const progressPct = hasCountdown
     ? Math.max(0, Math.min(100, ((TOTAL_SECONDS - secondsLeft) / TOTAL_SECONDS) * 100))

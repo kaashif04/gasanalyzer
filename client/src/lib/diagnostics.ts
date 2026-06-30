@@ -142,6 +142,20 @@ export function tempCorrelations(rows: Reading[]): TempCorrelation[] {
       )}) — treat this correlation with reduced confidence outside that band.`
     : "";
 
+  // CALIBRATE mode only re-fits the zero-point intercept, never the
+  // temperature/humidity SLOPE (deliberately — a single short session can't
+  // trustworthy re-estimate a slope). So persistent correlation right after
+  // a genuine CALIBRATE run (not the lab-fit default) is a meaningful,
+  // different signal from persistent correlation against the original
+  // fit: it means the slope itself doesn't match this room/chamber's actual
+  // thermal behavior, which intercept-only recalibration cannot fix — only
+  // a full baseline re-derivation (longer, stable-conditions capture) would.
+  const latestEpoch = rows.length ? rows[rows.length - 1].calib_epoch : "";
+  const hasRealCalibration = !!latestEpoch && !latestEpoch.startsWith("lab-fit-");
+  const slopeCaveat = hasRealCalibration
+    ? ` CALIBRATE mode only refits the zero-point (intercept), not how strongly this channel responds to temperature (the slope) — persistent correlation after a real calibration means the slope itself may not match current conditions, which needs a full baseline re-derivation, not another quick recalibration.`
+    : "";
+
   return MQ_CHANNELS.map((ch) => {
     const series = rows.map((r) => r[ch.comp]);
     const r = pearson(temps, series);
@@ -162,12 +176,12 @@ export function tempCorrelations(rows: Reading[]): TempCorrelation[] {
       level = "amber";
       note = `${ch.label} shows residual temperature coupling (r=${r.toFixed(
         2
-      )}) — watch for compensation drift.${rangeCaveat}`;
+      )}) — watch for compensation drift.${rangeCaveat}${slopeCaveat}`;
     } else {
       level = "red";
       note = `${ch.label} still temperature-correlated after compensation (r=${r.toFixed(
         2
-      )}) — compensation may need refitting for current conditions.${rangeCaveat}`;
+      )}) — compensation may need refitting for current conditions.${rangeCaveat}${slopeCaveat}`;
     }
     return {
       channelId: ch.id,
@@ -384,18 +398,25 @@ export interface Disturbance {
   detail: string;
 }
 
-/** Least-squares slope of y over index (per-sample). */
+/** Least-squares slope of y over index (per-sample). Non-finite values (e.g.
+ *  blank temp_c on a calibrating-mode status ping) are filtered out first —
+ *  a single NaN in a raw sum poisons the whole result via JS NaN propagation,
+ *  which previously made this silently return NaN (and every threshold
+ *  check against it silently evaluate to false) whenever a calibrating row
+ *  fell inside the window, rather than actually computing the real trend
+ *  from the valid samples. */
 function slope(values: number[]): number {
-  const n = values.length;
+  const finite = values.filter(Number.isFinite);
+  const n = finite.length;
   if (n < 2) return 0;
   const xm = (n - 1) / 2;
   let ym = 0;
-  for (const v of values) ym += v;
+  for (const v of finite) ym += v;
   ym /= n;
   let num = 0,
     den = 0;
   for (let i = 0; i < n; i++) {
-    num += (i - xm) * (values[i] - ym);
+    num += (i - xm) * (finite[i] - ym);
     den += (i - xm) * (i - xm);
   }
   return den === 0 ? 0 : num / den;
@@ -436,10 +457,14 @@ export function classifyDisturbances(
   // ── (c) Sensor fault: sibling divergence ──
   // Compares small AVERAGED windows at each edge (not single endpoint
   // samples) specifically so a single-cycle coincident glitch landing on the
-  // first or last row can't masquerade as a sustained divergence.
+  // first or last row can't masquerade as a sustained divergence. Filters
+  // non-finite values first (e.g. a calibrating-mode status ping has blank
+  // comp columns) — same NaN-propagation hazard as slope() above: a single
+  // NaN in the slice would otherwise silently poison aChange/bChange/sep
+  // into NaN, making every threshold check against them silently false.
   const edgeAvg = (arr: number[], n: number, fromStart: boolean) => {
-    const slice = fromStart ? arr.slice(0, n) : arr.slice(-n);
-    return slice.reduce((a, v) => a + v, 0) / slice.length;
+    const slice = (fromStart ? arr.slice(0, n) : arr.slice(-n)).filter(Number.isFinite);
+    return slice.length ? slice.reduce((a, v) => a + v, 0) / slice.length : NaN;
   };
   for (const { sensor, gasName, a, b } of SENSOR_PAIRS) {
     const w = tail(30);
