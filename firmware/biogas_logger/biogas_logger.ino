@@ -185,12 +185,39 @@ float compensate(float vRaw, const CompCoef &k, float tempC, float hum) {
   return vRaw - predicted;
 }
 
-// voltsToPercent() and MQ*_FULLSCALE_V removed - LCD now shows the actual
-// compensated voltage directly (2 d.p., e.g. "0.12V") so it matches the
-// app's Voltage readout exactly. The old "% of sensor range" display was
-// misleading because the full-scale constant was an arbitrary placeholder;
-// a post-calibration drift of ~0.12V was displaying as 40%+ even with no
-// gas present, causing confusion vs the app's correct numerical readout.
+// ---------- MQ datasheet-curve % estimate (for LCD only) ----------
+// Mirrors the app's convertMq(vComp, sensor, "percent") exactly, so the LCD
+// and app always agree. This is a datasheet APPROXIMATION (the app labels it
+// "estimated — not yet calibrated against lab equipment") — not a calibrated
+// gas-fraction model. Circuit assumptions match the app's units.ts constants:
+// VCC=5V, RL=10 kΩ. Formula: pct = a * (Rs/Ro)^b / 10000 (ppm → %).
+const float MQ_VCC = 5.0f;
+const float MQ_RL  = 10.0f;   // kΩ
+
+float compVoltToPct(float vComp, float curveA, float curveB, float cleanAirRatio) {
+  if (isnan(vComp)) return NAN;
+  float v  = max(MQ_VCC * 0.01f, min(vComp, MQ_VCC * 0.99f));
+  float rs  = ((MQ_VCC - v) / v) * MQ_RL;
+  float ro  = MQ_RL * cleanAirRatio;
+  float ppm = curveA * pow(rs / ro, curveB);
+  return max(0.0f, ppm) / 10000.0f;   // ppm -> percent
+}
+
+// Adaptive decimal places — always fits "Methane :" or "Hydrogen:" + value
+// in 16 chars INCLUDING the optional spike "!" at position 15:
+//   < 0.1%   -> 3 d.p.  "0.003%"  (6 chars, leaves room for "!")
+//   < 1%     -> 2 d.p.  "0.56%"
+//   < 10%    -> 2 d.p.  "5.61%"
+//   >= 10%   -> 1 d.p.  "12.3%"
+//   >= 100%  -> 0 d.p.  "100%"
+String fmtPct(float pct) {
+  if (isnan(pct)) return String("--");
+  if (pct < 0)    pct = 0;
+  if (pct >= 100) return String((int)pct) + "%";
+  if (pct >= 10)  return String(pct, 1) + "%";
+  if (pct >= 1)   return String(pct, 2) + "%";
+                  return String(pct, 3) + "%";   // < 1%: 3 d.p. max
+}
 
 // ---------- ADS1115 read with spike rejection (forward-declared - used by
 // both the normal loop() and runCalibrateMode()) ----------
@@ -853,11 +880,14 @@ void updateLCD(int co2, float t, float h, float mq4c, float mq8c,
               : ("T:" + String(t, 0) + "C H:" + String(h, 0) + "%");
 
   } else if (lcdScreen == 1) {
-    // Matches the app's Voltage readout: actual compensated volts, 2 d.p.
-    // "Methane :0.12V" / "Hydrogen:-0.04V" - both fit comfortably in 16 chars
-    // including room for the spike "!" indicator at position 15.
-    line0 = "Methane :" + (!isnan(mq4c) ? (String(mq4c, 2) + "V") : String("--"));
-    line1 = "Hydrogen:" + (!isnan(mq8c) ? (String(mq8c, 2) + "V") : String("--"));
+    // Same datasheet-curve formula as the app's "Percent" unit mode —
+    // matches what the dashboard shows, so LCD and app always agree.
+    // Coefficients: MQ-4 (Methane) a=1012.7 b=-2.786 clean-air ratio=4.4
+    //               MQ-8 (Hydrogen) a=976.97  b=-1.6  clean-air ratio=70
+    float pct4 = compVoltToPct(mq4c, 1012.7f, -2.786f, 4.4f);
+    float pct8 = compVoltToPct(mq8c,  976.97f,  -1.6f, 70.0f);
+    line0 = "Methane :" + fmtPct(pct4);
+    line1 = "Hydrogen:" + fmtPct(pct8);
     if (spike) {
       while (line1.length() < 15) line1 += ' ';   // pad out to the "!" column
       line1 += "!";                                // ! = glitch filtered this cycle
