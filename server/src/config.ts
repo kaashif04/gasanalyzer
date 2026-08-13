@@ -24,10 +24,19 @@ export const config = {
   // strings are written in (the spreadsheet/Apps Script timezone — not the
   // timezone of whatever machine happens to run this backend). Default 480 =
   // UTC+8. MUST be explicit: parsing a naive datetime string with the host
-  // process's local timezone breaks the moment this runs somewhere other
-  // than the original dev machine's zone (e.g. Render's containers run UTC),
+  // process's local timezone breaks the moment this runs somewhere other than
+  // the original dev machine's zone (e.g. Render's containers run UTC),
   // silently shifting every row's timestamp by the zone difference.
   sheetTzOffsetMin: Number(process.env.SHEET_TZ_OFFSET_MIN) || 480,
+  // How many calendar days of history to keep in memory. The sheet grows
+  // indefinitely (121k+ rows, 50+ days of data) — loading it all on every
+  // restart fills V8's heap and causes an OOM crash on Render's free tier.
+  // On startup the store fetches just the timestamp column (~4 MB), scans
+  // backward to find the row that is HISTORY_DAYS ago, then only loads from
+  // there forward. Steady-state polls are unaffected (always incremental).
+  // Older rows stay in the sheet for archival / manual export; they just
+  // aren't held in the server's RAM.
+  historyDays: Number(process.env.HISTORY_DAYS) || 30,
   useMock: explicitMock || missingCreds,
   mockReason: explicitMock
     ? "USE_MOCK=true"

@@ -102,6 +102,18 @@ export async function fetchHeader(): Promise<string[]> {
   return (values[0] ?? []).map((h) => String(h).trim());
 }
 
+/**
+ * Fetch only the timestamp column (col A) as raw strings. Used on startup
+ * to locate the right starting row without downloading all 20+ sensor
+ * columns. At 121k rows the full payload is ~4 MB instead of ~80 MB,
+ * staying well within the available heap even before we know where to start.
+ */
+export async function fetchTimestampColumn(): Promise<string[]> {
+  const values = await fetchValues(`${config.sheetRange}!A:A`);
+  // values[0] is the header ("timestamp"); data starts at index 1.
+  return values.slice(1).map((r) => String(r[0] ?? ""));
+}
+
 /** Turn raw data rows (no header row included) into typed Readings, given an
  *  already-fetched header for the name→index map. Rows with an unparseable
  *  timestamp are dropped. */

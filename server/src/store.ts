@@ -1,5 +1,10 @@
 import { config } from "./config.js";
-import { fetchDataRows, fetchHeader } from "./sheets.js";
+import {
+  fetchDataRows,
+  fetchHeader,
+  fetchTimestampColumn,
+  parseTimestamp,
+} from "./sheets.js";
 import { generateHistory, generateOne, MOCK_STEP_MS } from "./mock.js";
 import { Reading } from "./types.js";
 
@@ -7,6 +12,11 @@ import { Reading } from "./types.js";
  * Holds all readings in memory, sorted ascending by time. A week of 30s data is
  * ~20k rows — trivial to keep resident, and it lets /api/history be a fast
  * in-memory filter rather than a per-request round-trip to Google.
+ *
+ * Memory cap: on startup the store skips old rows so only the last
+ * config.historyDays of data is fetched. The merge() method also trims
+ * the in-memory array if it would grow beyond that window, so the footprint
+ * stays bounded even across a very long continuous uptime.
  */
 class ReadingStore {
   private readings: Reading[] = [];
@@ -14,8 +24,8 @@ class ReadingStore {
   /** How many data rows (excluding header) we've already pulled from the
    *  sheet. Lets each poll ask for only what's new instead of re-fetching
    *  and re-parsing the whole, ever-growing sheet every cycle. Resets to 0
-   *  on process restart, at which point the next poll naturally re-pulls
-   *  everything once. */
+   *  on process restart; the startup skip logic in pollSheet() then fast-
+   *  forwards past old history before the first real fetch. */
   private ingestedDataRows = 0;
 
   lastPollOk = false;
@@ -55,6 +65,17 @@ class ReadingStore {
     if (added) {
       this.readings.sort((a, b) => a.ts - b.ts);
       this.lastIngestAt = Date.now();
+
+      // Trim readings older than the history window to keep memory bounded.
+      // 2880 = 2 readings/min × 60 min/h × 24 h/day. The factor of 1.1
+      // gives a small buffer so a temporary surge in readings doesn't cause
+      // constant eviction; the startup skip is the primary guard, this is
+      // just a backstop for very long uptimes.
+      const MAX_ROWS = Math.ceil(config.historyDays * 2880 * 1.1);
+      if (this.readings.length > MAX_ROWS) {
+        const evict = this.readings.splice(0, this.readings.length - MAX_ROWS);
+        for (const r of evict) this.byTs.delete(r.ts);
+      }
     }
     return added;
   }
@@ -62,6 +83,30 @@ class ReadingStore {
   private async pollSheet(): Promise<void> {
     try {
       const header = await fetchHeader();
+
+      // On the very first poll after (re)start: fast-forward past old history
+      // so we don't load 100k+ rows into memory. Fetch only the timestamp
+      // column (~4 MB for 121k rows vs ~80 MB for all columns), scan backward
+      // to find the row that sits at the history cutoff, then set
+      // ingestedDataRows to skip everything older than that.
+      if (this.ingestedDataRows === 0) {
+        const cutoffMs = Date.now() - config.historyDays * 86_400_000;
+        const timestamps = await fetchTimestampColumn();
+        let skipRows = 0;
+        for (let i = timestamps.length - 1; i >= 0; i--) {
+          const ts = parseTimestamp(timestamps[i]);
+          if (!Number.isNaN(ts) && ts < cutoffMs) {
+            skipRows = i + 1; // all rows up to and including this one are old
+            break;
+          }
+        }
+        this.ingestedDataRows = skipRows;
+        console.log(
+          `[store] history window: skipping ${skipRows}/${timestamps.length}` +
+            ` data rows (loading last ${timestamps.length - skipRows})`
+        );
+      }
+
       const { readings, rawRowCount } = await fetchDataRows(
         header,
         this.ingestedDataRows + 1
