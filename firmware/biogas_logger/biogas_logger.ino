@@ -789,14 +789,6 @@ bool sendToSheets(String tsEnc, float r0, float r1, float r2, float r3,
   Serial.print("[i] Free heap: "); Serial.print(ESP.getFreeHeap());
   Serial.print(" bytes, WiFi RSSI: "); Serial.print(WiFi.RSSI()); Serial.println(" dBm");
 
-  // NOTE: the Apps Script webhook (GSCRIPT_URL) must also be updated to read
-  // these five NEW query params and write them into the matching new sheet
-  // columns - see the project README/chat notes for the exact param name ->
-  // column name mapping (sess -> session_start, epoch -> calib_epoch,
-  // tmin/tmax/hmin/hmax -> calib_temp_min_c/calib_temp_max_c/
-  // calib_hum_min_pct/calib_hum_max_pct). Until that script is updated, these
-  // params are sent but silently ignored by Sheets - harmless, but the new
-  // columns won't populate.
   String url = GSCRIPT_URL + "?ts=" + tsEnc +
                "&mq4_1r=" + String(r0,4) + "&mq4_2r=" + String(r1,4) +
                "&mq8_1r=" + String(r2,4) + "&mq8_2r=" + String(r3,4) +
@@ -816,8 +808,8 @@ bool sendToSheets(String tsEnc, float r0, float r1, float r2, float r3,
     client.setHandshakeTimeout(15);     // seconds; default can be too short on weak links
 
     HTTPClient https;
-    https.setConnectTimeout(8000);      // ms
-    https.setTimeout(8000);
+    https.setConnectTimeout(15000);     // ms - 8s was too short once the sheet grew to 120k+ rows
+    https.setTimeout(20000);            // Apps Script appendRow on a large sheet can take 10-15s
 
     if (!https.begin(client, url)) {
       Serial.println("[!] https.begin() failed (bad URL or client setup)");
